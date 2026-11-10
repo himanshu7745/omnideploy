@@ -1,0 +1,4 @@
+[project]
+name = "inventory"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.110", "uvicorn[standard]"]

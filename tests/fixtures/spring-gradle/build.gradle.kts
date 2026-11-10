@@ -1,0 +1,5 @@
+plugins {
+  java
+  id("org.springframework.boot") version "3.3.0"
+}
+java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }

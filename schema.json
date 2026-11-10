@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "omnideploy.json",
+  "description": "Configuration for the omnideploy CLI. Values here override auto-detection.",
+  "type": "object",
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "type": "string", "description": "Service/site name used when creating apps on providers." },
+    "build": {
+      "type": "object",
+      "properties": {
+        "command": { "type": "string", "description": "Build command for static sites, e.g. \"npm run build\"." },
+        "output": { "type": "string", "description": "Folder with the built static site, e.g. \"dist\"." }
+      },
+      "additionalProperties": false
+    },
+    "app": {
+      "type": "object",
+      "properties": {
+        "start": { "type": "string", "description": "Start command for server apps. Must listen on $PORT." },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Default port when $PORT is not set." },
+        "healthCheckPath": { "type": "string", "pattern": "^/", "description": "Health check path used by Render/Railway." }
+      },
+      "additionalProperties": false
+    },
+    "providers": {
+      "type": "object",
+      "description": "Per-provider options. IDs created on first deploy are saved here automatically.",
+      "properties": {
+        "vercel": {
+          "type": "object",
+          "properties": { "project": { "type": "string" }, "projectId": { "type": "string" }, "teamId": { "type": "string" } }
+        },
+        "netlify": {
+          "type": "object",
+          "properties": { "siteId": { "type": "string" }, "siteName": { "type": "string" } }
+        },
+        "github-pages": {
+          "type": "object",
+          "properties": {
+            "repo": { "type": "string", "description": "owner/repo; defaults to the origin remote." },
+            "branch": { "type": "string", "default": "gh-pages" },
+            "cname": { "type": "string", "description": "Custom domain." }
+          }
+        },
+        "railway": {
+          "type": "object",
+          "properties": { "service": { "type": "string" }, "environment": { "type": "string" } }
+        },
+        "render": {
+          "type": "object",
+          "properties": {
+            "serviceId": { "type": "string" },
+            "ownerId": { "type": "string", "description": "Render workspace ID." },
+            "serviceName": { "type": "string" },
+            "branch": { "type": "string" },
+            "plan": { "type": "string", "default": "free" },
+            "region": { "type": "string", "default": "oregon" }
+          }
+        }
+      },
+      "additionalProperties": { "type": "object" }
+    }
+  }
+}
