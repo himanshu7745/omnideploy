@@ -1,6 +1,6 @@
 {
   "name": "omnideploy-cli",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "description": "One CLI to detect, containerize and deploy any project to Vercel, Netlify, GitHub Pages, Railway, Render and more.",
   "repository": {
     "type": "git",
