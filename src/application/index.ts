@@ -1,5 +1,6 @@
 export * from './services/ProviderRegistry.js';
 export * from './services/CredentialResolver.js';
+export * from './services/RepositoryBootstrapper.js';
 export * from './services/serviceName.js';
 export * from './use-cases/DetectProject.js';
 export * from './use-cases/GenerateArtifacts.js';

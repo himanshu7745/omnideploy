@@ -22,6 +22,7 @@ export class RailwayProvider implements DeploymentProvider {
   readonly capabilities: ProviderCapabilities = {
     kinds: ['static', 'server', 'serverless'],
     serverLanguages: 'any',
+    previews: false,
     buildsFromGit: false,
     requiredCli: { bin: 'railway', install: INSTALL },
     auth: { envVar: 'RAILWAY_TOKEN', tokenUrl: 'https://railway.com/account/tokens  (create a *project* token: Project → Settings → Tokens)' },
@@ -50,11 +51,12 @@ export class RailwayProvider implements DeploymentProvider {
     const logsUrl = output.match(/https:\/\/railway\.(?:com|app)\/project\/\S+/)?.[0];
     if (up.exitCode !== 0) {
       const tail = output.trim().split('\n').slice(-12).join('\n');
-      throw new DeploymentFailedError('Railway', tail || `railway up exited with ${up.exitCode}`, logsUrl ? `Build logs: ${logsUrl}` : undefined);
+      throw new DeploymentFailedError('Railway', tail || `railway up exited with ${up.exitCode}`, railwayHint(output) ?? (logsUrl ? `Build logs: ${logsUrl}` : undefined));
     }
 
     ctx.progress('fetching public URL');
     const domain = await this.proc.run('railway', ['domain', ...scope], { cwd: ctx.profile.rootDir, env });
+    if (domain.exitCode !== 0) ctx.logger.warn(`Railway deployed, but no public URL could be created: ${redact(domain.stderr || domain.stdout, ctx.token).trim().split('\n').pop()}`);
     const url = `${domain.stdout}\n${domain.stderr}`.match(/https:\/\/[a-z0-9.-]+\.(?:up\.railway\.app|railway\.app|[a-z]{2,})/i)?.[0];
 
     return {
@@ -65,4 +67,14 @@ export class RailwayProvider implements DeploymentProvider {
       dashboardUrl: logsUrl,
     };
   }
+}
+
+/** Turns the CLI's most common failures into a next step. */
+export function railwayHint(output: string): string | undefined {
+  if (/multiple services/i.test(output)) return 'This project has several services. Set providers.railway.service in omnideploy.json to the one to deploy.';
+  if (/unauthori[sz]ed|invalid (project )?token|not authorized|project token not found/i.test(output)) {
+    return 'RAILWAY_TOKEN must be a *project* token (Project → Settings → Tokens), not an account token. Run `omnideploy login railway` again.';
+  }
+  if (/environment .*not found/i.test(output)) return 'Check providers.railway.environment in omnideploy.json (e.g. "production").';
+  return undefined;
 }

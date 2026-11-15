@@ -5,11 +5,24 @@ export function parseGitHubRemote(url: string): { owner: string; repo: string } 
   return m ? { owner: m[1]!, repo: m[2]! } : undefined;
 }
 
+/** Parses `git status --porcelain -z`: "XY path\0", where renames/copies are followed by "\0origPath". */
+export function parsePorcelainZ(out: string): string[] {
+  const parts = out.split('\0');
+  const paths: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i]!;
+    if (entry.length < 4) continue;
+    paths.push(entry.slice(3));
+    if (entry[0] === 'R' || entry[0] === 'C') i++; // skip the original path
+  }
+  return paths;
+}
+
 export class CliGit implements GitPort {
   constructor(private readonly proc: ProcessRunnerPort) {}
 
-  private async git(dir: string, args: string[], what: string): Promise<string> {
-    const r = await this.proc.run('git', args, { cwd: dir });
+  private async git(dir: string, args: string[], what: string, env?: Record<string, string>): Promise<string> {
+    const r = await this.proc.run('git', args, { cwd: dir, env });
     if (r.exitCode !== 0) throw new GitError(`git ${what} failed: ${(r.stderr || r.stdout).trim()}`);
     return r.stdout.trim();
   }
@@ -31,12 +44,17 @@ export class CliGit implements GitPort {
     return r.exitCode === 0 ? r.stdout.trim() : null;
   }
 
+  async headCommit(dir: string): Promise<string | null> {
+    const r = await this.proc.run('git', ['rev-parse', 'HEAD'], { cwd: dir });
+    return r.exitCode === 0 ? r.stdout.trim() : null;
+  }
+
   async dirtyPaths(dir: string, paths: string[] = []): Promise<string[]> {
-    const out = await this.git(dir, ['status', '--porcelain', '--untracked-files=all', '--', ...paths], 'status');
-    return out
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => line.slice(3).split(' -> ').pop()!.replace(/^"|"$/g, ''));
+    // -z: NUL-separated, unquoted paths. Read stdout raw — each entry starts with a 2-char status that may be
+    // a space (" M pom.xml"), so trimming the output would eat the first character of the first path.
+    const r = await this.proc.run('git', ['status', '--porcelain', '-z', '--untracked-files=all', '--', ...paths], { cwd: dir });
+    if (r.exitCode !== 0) throw new GitError(`git status failed: ${(r.stderr || r.stdout).trim()}`);
+    return parsePorcelainZ(r.stdout);
   }
 
   async commit(dir: string, paths: string[], message: string): Promise<void> {
@@ -44,9 +62,41 @@ export class CliGit implements GitPort {
     await this.git(dir, [...(await this.identityArgs(dir)), 'commit', '-m', message, '--', ...paths], 'commit');
   }
 
-  async push(dir: string, remote = 'origin', branch?: string): Promise<void> {
+  async commitAll(dir: string, message: string): Promise<void> {
+    await this.git(dir, ['add', '-A'], 'add');
+    await this.git(dir, [...(await this.identityArgs(dir)), 'commit', '-q', '-m', message], 'commit');
+  }
+
+  async push(dir: string, remote = 'origin', branch?: string, auth?: { token: string }): Promise<void> {
     const target = branch ?? (await this.currentBranch(dir)) ?? 'HEAD';
-    await this.git(dir, ['push', '-u', remote, target], 'push');
+    // Pass the token through GIT_CONFIG_* env vars (git ≥ 2.31) so it never appears in argv or .git/config.
+    const env = auth
+      ? {
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+          GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${auth.token}`).toString('base64')}`,
+          GIT_TERMINAL_PROMPT: '0',
+        }
+      : undefined;
+    await this.git(dir, ['push', '-u', remote, target], 'push', env);
+  }
+
+  async init(dir: string, branch: string): Promise<void> {
+    await this.git(dir, ['init', '-q'], 'init');
+    await this.git(dir, ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], 'symbolic-ref');
+  }
+
+  async unpushedCommits(dir: string): Promise<number | null> {
+    const r = await this.proc.run('git', ['rev-list', '--count', '@{u}..HEAD'], { cwd: dir });
+    return r.exitCode === 0 ? Number(r.stdout.trim()) || 0 : null;
+  }
+
+  async hasCommits(dir: string): Promise<boolean> {
+    return (await this.proc.run('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: dir })).exitCode === 0;
+  }
+
+  async addRemote(dir: string, name: string, url: string): Promise<void> {
+    await this.git(dir, ['remote', 'add', name, url], 'remote add');
   }
 
   async publishDirectory(sourceDir: string, remoteUrl: string, branch: string, message: string): Promise<void> {

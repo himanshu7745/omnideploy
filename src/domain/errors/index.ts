@@ -95,3 +95,15 @@ export class UserCancelledError extends DomainError {
     super('Operation cancelled.', undefined, 'CANCELLED');
   }
 }
+
+/** The provider cannot read the project's git repository; `grantUrl` is where the user can grant access. */
+export class RepoAccessError extends DomainError {
+  constructor(
+    readonly provider: string,
+    readonly repo: string,
+    readonly grantUrl: string,
+    hint: string,
+  ) {
+    super(`${provider} cannot access ${repo}.`, hint, 'REPO_ACCESS');
+  }
+}

@@ -56,10 +56,20 @@ export class DoctorCheck {
       checks.push(
         remote
           ? { name: 'Git remote', status: 'ok', detail: remote.url }
-          : { name: 'Git remote', status: 'warn', detail: 'none', fix: 'Render and GitHub Pages need a pushed git remote (git remote add origin <url>).' },
+          : {
+              name: 'Git remote',
+              status: 'warn',
+              detail: 'none',
+              fix: 'Render: on the first deploy omnideploy offers to create a private GitHub repo.\nGitHub Pages: add a GitHub remote (git remote add origin <url>).',
+            },
       );
     } else {
-      checks.push({ name: 'Git', status: 'warn', detail: 'not a git repository', fix: 'Render and GitHub Pages need one: git init.' });
+      checks.push({
+        name: 'Git',
+        status: 'warn',
+        detail: 'not a git repository',
+        fix: 'Render: on the first deploy omnideploy offers to set up git and a private GitHub repo.\nGitHub Pages: git init and add a GitHub remote.',
+      });
     }
 
     for (const row of await this.listProviders.execute(profile)) {

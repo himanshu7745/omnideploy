@@ -12,8 +12,11 @@ export function renderUsesDocker(profile: ProjectProfile): boolean {
 /** Install+build command for Render's native runtimes. */
 export function renderNativeBuild(p: ProjectProfile): string {
   switch (p.language) {
-    case 'node':
-      return [p.meta?.install || 'npm install', p.buildCommand].filter(Boolean).join(' && ');
+    case 'node': {
+      // Lockfile-based installs (npm ci, --frozen-lockfile) fail without a lockfile.
+      const install = p.meta?.lockfile ? p.meta.install || 'npm ci' : `${p.packageManager && p.packageManager !== 'npm' ? p.packageManager : 'npm'} install`;
+      return [install, p.buildCommand].filter(Boolean).join(' && ');
+    }
     case 'python': {
       const install =
         p.packageManager === 'poetry' ? 'pip install poetry && poetry install --no-root --only main'
@@ -28,6 +31,12 @@ export function renderNativeBuild(p: ProjectProfile): string {
     default:
       return p.buildCommand ?? '';
   }
+}
+
+/** Build command for a Render static site: Render does not install dependencies by itself. */
+export function renderStaticBuild(p: ProjectProfile): string {
+  if (!p.buildCommand) return '';
+  return p.language === 'node' ? renderNativeBuild(p) : p.buildCommand;
 }
 
 export function renderRuntime(p: ProjectProfile): string {
@@ -53,7 +62,8 @@ export class RenderYamlGenerator implements ArtifactGenerator {
       region: (opts.providerOptions.region as string | undefined) ?? 'oregon',
     };
     if (runtime === 'static') {
-      if (p.buildCommand) service.buildCommand = p.buildCommand;
+      const build = renderStaticBuild(p);
+      if (build) service.buildCommand = build;
       service.staticPublishPath = `./${p.outputDir ?? '.'}`;
       delete service.plan;
       delete service.region;
@@ -65,7 +75,7 @@ export class RenderYamlGenerator implements ArtifactGenerator {
       service.startCommand = p.startCommand;
     }
     if (runtime !== 'static') {
-      service.healthCheckPath = opts.healthCheckPath ?? '/';
+      service.healthCheckPath = opts.healthCheckPath ?? p.healthCheckPath ?? '/';
       service.autoDeploy = true;
     }
     if (p.kind === 'static' && /^(vite|create-react-app|angular)/.test(p.framework ?? '')) {

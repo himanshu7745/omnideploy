@@ -8,9 +8,13 @@ export interface ProviderCapabilities {
   serverLanguages: readonly Language[] | 'any';
   /** Frameworks it runs natively as serverless (e.g. nextjs on Vercel). */
   serverlessFrameworks?: readonly string[];
+  /** True if it can create preview (non-production) deployments for `deploy --preview`. */
+  previews?: boolean;
   /** True if the provider builds from the git remote rather than uploaded local files. */
   buildsFromGit: boolean;
   /** Required external CLI binary, if any. */
   requiredCli?: { bin: string; install: string };
   auth: { envVar: string; tokenUrl: string };
+  /** Apps on git hosts that must be able to read the repo, keyed by host id (e.g. `{ github: 'render' }`). */
+  gitHostApps?: Readonly<Record<string, string>>;
 }

@@ -1,7 +1,15 @@
 {
-  "name": "omnideploy",
-  "version": "0.1.0",
+  "name": "omnideploy-cli",
+  "version": "0.2.6",
   "description": "One CLI to detect, containerize and deploy any project to Vercel, Netlify, GitHub Pages, Railway, Render and more.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/himanshu7745/omnideploy.git"
+  },
+  "homepage": "https://github.com/himanshu7745/omnideploy#readme",
+  "bugs": {
+    "url": "https://github.com/himanshu7745/omnideploy/issues"
+  },
   "type": "module",
   "bin": {
     "omnideploy": "dist/main.js"
@@ -21,7 +29,8 @@
     "test:watch": "vitest",
     "lint:arch": "depcruise src --config .dependency-cruiser.cjs",
     "check": "npm run typecheck && npm run lint:arch && npm test",
-    "smoke:docker": "npm run build && scripts/docker-smoke.sh"
+    "smoke:docker": "npm run build && scripts/docker-smoke.sh",
+    "prepublishOnly": "npm run check && npm run build"
   },
   "license": "MIT",
   "dependencies": {

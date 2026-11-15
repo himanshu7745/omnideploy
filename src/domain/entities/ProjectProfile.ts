@@ -19,6 +19,8 @@ export interface ProjectProfile {
   outputDir?: string;
   /** Port a server app listens on by default (the platform's $PORT always wins at runtime). */
   port: number;
+  /** Path the platform probes to decide a server app is healthy (from omnideploy.json app.healthCheckPath). */
+  healthCheckPath?: string;
   hasDockerfile: boolean;
   /** Language-specific extras for generators (e.g. { buildTool: 'gradle', artifactName: 'app.jar' }). */
   meta?: Record<string, string>;

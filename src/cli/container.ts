@@ -13,6 +13,7 @@ import {
   LoginProvider,
   LogoutProvider,
   ProviderRegistry,
+  RepositoryBootstrapper,
 } from '../application/index.js';
 import { JsonConfigRepository } from '../infrastructure/config/JsonConfigRepository.js';
 import { FileCredentialStore } from '../infrastructure/credentials/FileCredentialStore.js';
@@ -20,8 +21,10 @@ import { builtInDetectors } from '../infrastructure/detectors/index.js';
 import { NodeFileSystem } from '../infrastructure/fs/NodeFileSystem.js';
 import { builtInGenerators } from '../infrastructure/generators/index.js';
 import { CliGit } from '../infrastructure/git/CliGit.js';
+import { GitHubRepositoryHost } from '../infrastructure/git/GitHubRepositoryHost.js';
 import { FetchHttpClient } from '../infrastructure/http/FetchHttpClient.js';
 import { ExecaProcessRunner } from '../infrastructure/process/ExecaProcessRunner.js';
+import { SystemBrowser } from '../infrastructure/process/SystemBrowser.js';
 import { builtInProviders } from '../infrastructure/providers/index.js';
 import { ClackPrompt } from './presenters/ClackPrompt.js';
 import { ConsoleLogger } from './presenters/ConsoleLogger.js';
@@ -58,6 +61,8 @@ export function createContainer(opts: ContainerOptions) {
   const generate = new GenerateArtifacts(builtInGenerators(), providers, fs, prompt, logger);
   const build = new BuildProject(proc, fs, logger);
   const listProviders = new ListProviders(providers, store, proc);
+  const repoHost = new GitHubRepositoryHost(http, proc);
+  const repos = new RepositoryBootstrapper(git, repoHost, fs, credentials, prompt, logger);
 
   return {
     prompt,
@@ -67,9 +72,9 @@ export function createContainer(opts: ContainerOptions) {
     generate,
     listProviders,
     init: new InitProject(detect, providers, generate, configRepo, prompt, logger),
-    deploy: new DeployProject(detect, providers, generate, build, credentials, configRepo, git, prompt, logger),
-    login: new LoginProvider(providers, store, prompt),
-    logout: new LogoutProvider(providers, store),
+    deploy: new DeployProject(detect, providers, generate, build, credentials, configRepo, git, repos, prompt, logger, new SystemBrowser(proc)),
+    login: new LoginProvider(providers, store, prompt, [repoHost]),
+    logout: new LogoutProvider(providers, store, [repoHost]),
     doctor: new DoctorCheck(detect, listProviders, git),
     status: new GetDeploymentStatus(providers, credentials, configRepo),
   };

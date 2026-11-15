@@ -48,6 +48,7 @@ export class VercelProvider implements DeploymentProvider {
     kinds: ['static', 'serverless'],
     serverLanguages: [],
     serverlessFrameworks: ['nextjs', 'nuxt', 'sveltekit', 'remix', 'astro'],
+    previews: true,
     buildsFromGit: false,
     auth: { envVar: 'VERCEL_TOKEN', tokenUrl: 'https://vercel.com/account/tokens' },
   };
@@ -70,8 +71,11 @@ export class VercelProvider implements DeploymentProvider {
     const name = (ctx.options.project as string | undefined) ?? ctx.serviceName;
     const query = { teamId: ctx.options.teamId as string | undefined, skipAutoDetectionConfirmation: 1 };
     const manifest = files.map((f) => ({ file: f.path, sha: sha1(f.data), size: f.data.byteLength }));
+    const projectId = ctx.options.projectId as string | undefined;
     const body = {
       name,
+      // Once known, deploy by ID so a project renamed in the dashboard keeps receiving deploys.
+      ...(projectId ? { project: projectId } : {}),
       files: manifest,
       target: ctx.production ? 'production' : undefined,
       projectSettings: isStatic ? { framework: null } : { framework: ctx.profile.framework === 'nextjs' ? 'nextjs' : ctx.profile.framework },
@@ -85,7 +89,8 @@ export class VercelProvider implements DeploymentProvider {
     if (created.status === 400) {
       const missing = new Set(created.data.error?.missing ?? []);
       if (created.data.error?.code !== 'missing_files' || missing.size === 0) {
-        throw new ProviderApiError('Vercel', JSON.stringify(created.data.error), 400);
+        const err = created.data.error as { code?: string; message?: string } | undefined;
+        throw new ProviderApiError('Vercel', err?.message ?? err?.code ?? 'bad request', 400);
       }
       await this.upload(ctx, files.filter((f) => missing.has(sha1(f.data))), query.teamId);
       ctx.progress('creating deployment');
@@ -116,6 +121,7 @@ export class VercelProvider implements DeploymentProvider {
   async status(ctx: ProviderContext, deploymentId?: string): Promise<DeploymentStatus> {
     const teamId = ctx.options.teamId as string | undefined;
     let id = deploymentId;
+    if (!id && !ctx.options.projectId) return { id: '-', state: 'unknown', message: 'No Vercel project yet — deploy first.' };
     if (!id) {
       const list = await this.http.request<{ deployments: Array<{ uid: string }> }>(
         { url: `${API}/v6/deployments`, headers: this.auth(ctx.token), query: { projectId: ctx.options.projectId as string, limit: 1, teamId } },

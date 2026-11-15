@@ -22,5 +22,6 @@ export function applyConfigOverrides(profile: ProjectProfile, config: ProjectCon
     outputDir: config.build?.output ?? profile.outputDir,
     startCommand: config.app?.start ?? profile.startCommand,
     port: config.app?.port ?? profile.port,
+    healthCheckPath: config.app?.healthCheckPath ?? profile.healthCheckPath,
   };
 }

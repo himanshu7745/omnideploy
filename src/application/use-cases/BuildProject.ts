@@ -43,6 +43,13 @@ export class BuildProject {
         'MISSING_OUTPUT',
       );
     }
+    if ((await this.fs.collectFiles(out)).length === 0) {
+      throw new DomainError(
+        `Build output directory "${profile.outputDir ?? '.'}" is empty.`,
+        opts.skipBuild ? 'Run the build first, or drop --no-build.' : 'Check that the build writes to this folder, or set build.output in omnideploy.json.',
+        'EMPTY_OUTPUT',
+      );
+    }
     this.logger.debug(`Deploying files from ${out}`);
     return out;
   }

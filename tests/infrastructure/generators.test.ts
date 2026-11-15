@@ -64,6 +64,21 @@ describe('render.yaml', () => {
     expect(svc.buildCommand).toContain('pip install gunicorn');
   });
 
+  it('installs dependencies before building a static site (Render does not)', async () => {
+    const vite = await profileOf('vite');
+    const withLock = { ...vite, packageManager: 'npm' as const, meta: { ...vite.meta, install: 'npm ci', lockfile: 'package-lock.json' } };
+    expect(services(withLock)[0].buildCommand).toBe('npm ci && npm run build');
+    // npm ci needs a lockfile; without one, fall back to a plain install.
+    const noLock = { ...withLock, meta: { ...withLock.meta, lockfile: '' } };
+    expect(services(noLock)[0].buildCommand).toBe('npm install && npm run build');
+    expect(services({ ...noLock, packageManager: 'pnpm' as const })[0].buildCommand).toBe('pnpm install && npm run build');
+  });
+
+  it('uses app.healthCheckPath for server apps', async () => {
+    const java = { ...(await profileOf('spring-maven')), healthCheckPath: '/actuator/health' };
+    expect(services(java)[0].healthCheckPath).toBe('/actuator/health');
+  });
+
   it('publishes static sites with an SPA rewrite', async () => {
     expect(services(await profileOf('vite'))[0]).toMatchObject({
       runtime: 'static',

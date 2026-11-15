@@ -18,7 +18,7 @@ export function registerDeploy(program: Command, env: CommandEnv): void {
     .command('deploy')
     .description('Deploy to one or more providers (default: those in omnideploy.json)')
     .argument('[providers...]', 'e.g. vercel netlify github-pages railway render')
-    .option('--preview', 'create a preview/draft deployment instead of production')
+    .option('--preview', 'create a preview/draft deployment instead of production (Vercel, Netlify)')
     .option('--no-build', 'skip the local build step')
     .option('-d, --dir <path>', 'deploy this directory as a static site')
     .option('--dry-run', 'show what would happen without deploying')

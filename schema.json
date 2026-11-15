@@ -4,22 +4,45 @@
   "description": "Configuration for the omnideploy CLI. Values here override auto-detection.",
   "type": "object",
   "properties": {
-    "$schema": { "type": "string" },
-    "name": { "type": "string", "description": "Service/site name used when creating apps on providers." },
+    "$schema": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string",
+      "description": "Service/site name used when creating apps on providers."
+    },
     "build": {
       "type": "object",
       "properties": {
-        "command": { "type": "string", "description": "Build command for static sites, e.g. \"npm run build\"." },
-        "output": { "type": "string", "description": "Folder with the built static site, e.g. \"dist\"." }
+        "command": {
+          "type": "string",
+          "description": "Build command for static sites, e.g. \"npm run build\"."
+        },
+        "output": {
+          "type": "string",
+          "description": "Folder with the built static site, e.g. \"dist\"."
+        }
       },
       "additionalProperties": false
     },
     "app": {
       "type": "object",
       "properties": {
-        "start": { "type": "string", "description": "Start command for server apps. Must listen on $PORT." },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Default port when $PORT is not set." },
-        "healthCheckPath": { "type": "string", "pattern": "^/", "description": "Health check path used by Render/Railway." }
+        "start": {
+          "type": "string",
+          "description": "Start command for server apps. Must listen on $PORT."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Default port when $PORT is not set."
+        },
+        "healthCheckPath": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Health check path used by Render/Railway."
+        }
       },
       "additionalProperties": false
     },
@@ -29,37 +52,103 @@
       "properties": {
         "vercel": {
           "type": "object",
-          "properties": { "project": { "type": "string" }, "projectId": { "type": "string" }, "teamId": { "type": "string" } }
+          "properties": {
+            "project": {
+              "type": "string",
+              "description": "Project name used on the first deploy; defaults to the top-level name."
+            },
+            "projectId": {
+              "type": "string",
+              "description": "Saved after the first deploy; later deploys target this project even if renamed."
+            },
+            "teamId": {
+              "type": "string",
+              "description": "Deploy into a team instead of your personal account."
+            }
+          }
         },
         "netlify": {
           "type": "object",
-          "properties": { "siteId": { "type": "string" }, "siteName": { "type": "string" } }
+          "properties": {
+            "siteId": {
+              "type": "string",
+              "description": "Saved after the first deploy. If the site is deleted, a new one is created."
+            },
+            "siteName": {
+              "type": "string",
+              "description": "Preferred site name (<name>.netlify.app); a suffix is added if it is taken."
+            }
+          }
         },
         "github-pages": {
           "type": "object",
           "properties": {
-            "repo": { "type": "string", "description": "owner/repo; defaults to the origin remote." },
-            "branch": { "type": "string", "default": "gh-pages" },
-            "cname": { "type": "string", "description": "Custom domain." }
+            "repo": {
+              "type": "string",
+              "description": "owner/repo; defaults to the origin remote."
+            },
+            "branch": {
+              "type": "string",
+              "default": "gh-pages"
+            },
+            "cname": {
+              "type": "string",
+              "description": "Custom domain."
+            }
           }
         },
         "railway": {
           "type": "object",
-          "properties": { "service": { "type": "string" }, "environment": { "type": "string" } }
+          "properties": {
+            "service": {
+              "type": "string",
+              "description": "Service to deploy to; required when the Railway project has several services."
+            },
+            "environment": {
+              "type": "string",
+              "description": "Railway environment, e.g. production or staging."
+            }
+          }
         },
         "render": {
           "type": "object",
           "properties": {
-            "serviceId": { "type": "string" },
-            "ownerId": { "type": "string", "description": "Render workspace ID." },
-            "serviceName": { "type": "string" },
-            "branch": { "type": "string" },
-            "plan": { "type": "string", "default": "free" },
-            "region": { "type": "string", "default": "oregon" }
+            "serviceId": {
+              "type": "string",
+              "description": "Saved after the first deploy. If the service is deleted, a new one is created."
+            },
+            "ownerId": {
+              "type": "string",
+              "description": "Render workspace ID."
+            },
+            "serviceName": {
+              "type": "string",
+              "description": "Name for the Render service; defaults to the top-level name."
+            },
+            "branch": {
+              "type": "string",
+              "description": "Branch Render builds; defaults to the current branch."
+            },
+            "plan": {
+              "type": "string",
+              "default": "free",
+              "description": "Instance type, e.g. free, starter, standard."
+            },
+            "region": {
+              "type": "string",
+              "default": "oregon"
+            },
+            "healthCheckPath": {
+              "type": "string",
+              "pattern": "^/",
+              "description": "Overrides app.healthCheckPath for Render."
+            }
           }
         }
       },
-      "additionalProperties": { "type": "object" }
+      "additionalProperties": {
+        "type": "object"
+      }
     }
   }
 }

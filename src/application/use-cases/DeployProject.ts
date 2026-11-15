@@ -3,8 +3,11 @@ import {
   describeProfile,
   DomainError,
   IncompatibleProviderError,
+  looksLikeSecret,
+  RepoAccessError,
   suggestAlternatives,
   UserCancelledError,
+  type BrowserPort,
   type ConfigRepositoryPort,
   type Deployment,
   type DeploymentProvider,
@@ -16,6 +19,7 @@ import {
 } from '../../domain/index.js';
 import type { CredentialResolver } from '../services/CredentialResolver.js';
 import type { ProviderRegistry } from '../services/ProviderRegistry.js';
+import type { RepositoryBootstrapper } from '../services/RepositoryBootstrapper.js';
 import { resolveServiceName } from '../services/serviceName.js';
 import type { BuildProject } from './BuildProject.js';
 import type { DetectProject } from './DetectProject.js';
@@ -61,8 +65,10 @@ export class DeployProject {
     private readonly credentials: CredentialResolver,
     private readonly configRepo: ConfigRepositoryPort,
     private readonly git: GitPort,
+    private readonly repos: RepositoryBootstrapper,
     private readonly prompt: PromptPort,
     private readonly logger: LoggerPort,
+    private readonly browser: BrowserPort,
   ) {}
 
   async execute(req: DeployRequest): Promise<DeployReport> {
@@ -78,6 +84,17 @@ export class DeployProject {
     for (const p of targets) {
       const c = checkCompatibility(profile, p.capabilities);
       if (!c.ok) throw new IncompatibleProviderError(p.displayName, c.reason, suggestAlternatives(profile, this.providers.all(), p.id));
+      // Never let --preview fall through to a production deploy.
+      if (!req.production && !p.capabilities.previews) {
+        const withPreviews = this.providers.all().filter((x) => x.capabilities.previews && checkCompatibility(profile, x.capabilities).ok);
+        throw new DomainError(
+          `${p.displayName} has no preview deployments, and --preview must not deploy to production.`,
+          withPreviews.length
+            ? `Drop --preview to deploy to production, or preview on ${withPreviews.map((x) => x.displayName).join(' or ')}.`
+            : 'Drop --preview to deploy to production.',
+          'PREVIEW_UNSUPPORTED',
+        );
+      }
     }
 
     // 2. Deployment files (Dockerfile, render.yaml, ...).
@@ -107,7 +124,7 @@ export class DeployProject {
 
     // 4. Git-based providers build from the remote — make sure generated files are pushed.
     const gitTargets = targets.filter((p) => p.capabilities.buildsFromGit);
-    if (gitTargets.length > 0 && !req.dryRun) await this.syncGitRemote(req, gitTargets, written);
+    const pushedCommit = gitTargets.length > 0 && !req.dryRun ? await this.syncGitRemote(req, gitTargets, written, resolveServiceName(profile, config)) : undefined;
 
     if (req.dryRun) {
       this.logger.info(`Dry run: would deploy to ${targets.map((p) => p.displayName).join(', ')}.`);
@@ -123,16 +140,19 @@ export class DeployProject {
       const spinner = this.prompt.spinner();
       spinner.start(`Deploying to ${p.displayName}`);
       try {
-        const deployment = await p.deploy({
-          profile,
-          options: config.providers[p.id] ?? {},
-          token: tokens.get(p.id)!,
-          sourceDir,
-          production: req.production,
-          serviceName,
-          logger: this.logger,
-          progress: (m) => spinner.message(`${p.displayName}: ${m}`),
-        });
+        const deployment = await this.deployWithRepoAccess(p, req, spinner, () =>
+          p.deploy({
+            profile,
+            options: config.providers[p.id] ?? {},
+            token: tokens.get(p.id)!,
+            sourceDir,
+            production: req.production,
+            serviceName,
+            pushedCommit,
+            logger: this.logger,
+            progress: (m) => spinner.message(`${p.displayName}: ${m}`),
+          }),
+        );
         spinner.stop(`${p.displayName}: ${deployment.url ?? 'deployed'}`, true);
         outcomes.push({ provider: p.id, displayName: p.displayName, ok: true, deployment });
         config.providers[p.id] = { ...config.providers[p.id], ...deployment.configUpdates };
@@ -143,6 +163,38 @@ export class DeployProject {
       }
     }
     return { profile, dryRun: false, outcomes };
+  }
+
+  /**
+   * If the provider can't read the git repo, ask to fix it: yes opens the grant page and retries, no stops this deploy.
+   * Private-repo access for third-party apps can only be granted by the account owner in the browser.
+   */
+  private async deployWithRepoAccess(
+    p: DeploymentProvider,
+    req: DeployRequest,
+    spinner: ReturnType<PromptPort['spinner']>,
+    run: () => Promise<Deployment>,
+  ): Promise<Deployment> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await run();
+      } catch (e) {
+        if (!(e instanceof RepoAccessError) || !this.prompt.interactive || req.yes || attempt > 3) throw e;
+        spinner.stop(`${p.displayName} cannot access ${e.repo}`, false);
+        const repoPath = e.repo.replace(/^https:\/\/[^/]+\//, '');
+        const go = await this.prompt.confirm(`${p.displayName} needs access to ${repoPath}. Open the page to grant it and continue deploying?`, true);
+        if (!go) throw new DomainError(`Deployment to ${p.displayName} cancelled.`, e.hint, 'REPO_ACCESS');
+        const opened = await this.browser.open(e.grantUrl);
+        this.prompt.note(
+          `${opened ? 'Opened' : 'Open'} ${e.grantUrl}\n\nSelect your account, then under Repository access add ${repoPath}\n(or choose "All repositories" so this never comes up again) and click Save.`,
+          `Grant ${p.displayName} access`,
+        );
+        if (!(await this.prompt.confirm('Done? Continue deploying', true))) {
+          throw new DomainError(`Deployment to ${p.displayName} cancelled.`, e.hint, 'REPO_ACCESS');
+        }
+        spinner.start(`Deploying to ${p.displayName}`);
+      }
+    }
   }
 
   private async chooseProviders(req: DeployRequest, profile: ProjectProfile, config: ProjectConfig): Promise<DeploymentProvider[]> {
@@ -166,37 +218,89 @@ export class DeployProject {
     return ids.map((id) => this.providers.get(id));
   }
 
-  private async syncGitRemote(req: DeployRequest, targets: DeploymentProvider[], generated: string[]): Promise<void> {
+  /** Makes sure the remote has what should be deployed. Returns the commit it pushed, if it pushed. */
+  private async syncGitRemote(req: DeployRequest, targets: DeploymentProvider[], generated: string[], repoName: string): Promise<string | undefined> {
     const names = targets.map((p) => p.displayName).join(', ');
-    if (!(await this.git.isRepo(req.rootDir)) || !(await this.git.remote(req.rootDir))) {
+    // No remote yet: create one (with consent), then push everything below.
+    const created = await this.repos.ensureRemote(req.rootDir, {
+      forWhat: names,
+      repoName,
+      yes: req.yes,
+      hostApps: targets.map((p) => p.capabilities.gitHostApps),
+    });
+
+    const dirty = await this.git.dirtyPaths(req.rootDir);
+    const secrets = dirty.filter(looksLikeSecret);
+    const changed = dirty.filter((d) => !secrets.includes(d));
+    const deployFiles = changed.filter((d) => generated.includes(d) || ['Dockerfile', '.dockerignore', 'render.yaml', 'omnideploy.json'].includes(d));
+    const codeFiles = changed.filter((d) => !deployFiles.includes(d));
+    const unpushed = created ? 0 : await this.git.unpushedCommits(req.rootDir); // null: branch never pushed
+    if (secrets.length > 0) this.logger.warn(`Not committing files that look like secrets: ${secrets.join(', ')} (add them to .gitignore).`);
+
+    const needsPush = created !== null || unpushed === null || unpushed > 0;
+    if (changed.length === 0 && !needsPush) return undefined; // the remote already has everything
+
+    const toCommit = await this.chooseCommit(req, names, deployFiles, codeFiles, unpushed, created !== null);
+    if (toCommit.length > 0) {
+      const message = toCommit.some((f) => codeFiles.includes(f)) ? 'Deploy with omnideploy' : 'chore: add deployment configuration (omnideploy)';
+      await this.git.commit(req.rootDir, toCommit, message);
+    }
+    if (toCommit.length === 0 && !needsPush) return undefined;
+
+    try {
+      if (created) await this.git.push(req.rootDir, 'origin', created.branch, { token: created.token });
+      else await this.git.push(req.rootDir);
+    } catch (e) {
+      if (e instanceof DomainError && /rejected|non-fast-forward|fetch first/i.test(e.message)) {
+        throw new DomainError(
+          'The remote has commits you do not have locally, so the push was rejected.',
+          'Run `git pull --rebase`, then deploy again.',
+          'GIT_PUSH_REJECTED',
+        );
+      }
+      throw e;
+    }
+    this.logger.success(created ? `Pushed to ${created.webUrl}` : `Pushed — ${names} will build the latest commit`);
+    return (await this.git.headCommit(req.rootDir)) ?? undefined;
+  }
+
+  /** Which changed files to commit before pushing. [] means push existing commits only (or nothing). */
+  private async chooseCommit(
+    req: DeployRequest,
+    names: string,
+    deployFiles: string[],
+    codeFiles: string[],
+    unpushed: number | null,
+    created: boolean,
+  ): Promise<string[]> {
+    const all = [...deployFiles, ...codeFiles];
+    // Creating the repo already had consent; --yes means "deploy what I have".
+    if (created || req.yes) return all;
+    if (!this.prompt.interactive) {
       throw new DomainError(
-        `${names} builds from a git repository, but this project has no git remote.`,
-        'Push the project to GitHub/GitLab (git init && git remote add origin <url> && git push -u origin HEAD).',
-        'NO_GIT_REMOTE',
+        `${names} builds from your git remote, which does not have your local changes yet.`,
+        'Commit and push them yourself, or re-run with --yes to commit and push all changes.',
+        'GIT_SYNC_REQUIRED',
       );
     }
-    const dirty = await this.git.dirtyPaths(req.rootDir);
-    if (dirty.length === 0) return;
-
-    const generatedDirty = dirty.filter((d) => generated.includes(d) || ['Dockerfile', '.dockerignore', 'render.yaml', 'omnideploy.json'].includes(d));
-    const otherDirty = dirty.filter((d) => !generatedDirty.includes(d));
-    if (otherDirty.length > 0) {
-      this.logger.warn(`${otherDirty.length} other uncommitted change(s) will NOT be deployed by ${names} (it builds from the remote).`);
-    }
-    if (generatedDirty.length === 0) return;
-
-    const ok =
-      req.yes ||
-      (this.prompt.interactive &&
-        (await this.prompt.confirm(`${names} builds from your git remote. Commit and push ${generatedDirty.join(', ')}?`, true)));
-    if (!ok) {
-      if (!this.prompt.interactive && !req.yes) {
-        throw new DomainError('Deployment files must be committed and pushed first.', 'Commit them yourself, or re-run with --yes.', 'GIT_SYNC_REQUIRED');
-      }
+    if (all.length === 0) {
+      const what = unpushed === null ? 'this branch' : `${unpushed} local commit(s)`;
+      if (await this.prompt.confirm(`${names} builds from your git remote. Push ${what} so it gets deployed?`, true)) return [];
       throw new UserCancelledError();
     }
-    await this.git.commit(req.rootDir, generatedDirty, 'chore: add deployment configuration (omnideploy)');
-    await this.git.push(req.rootDir);
-    this.logger.success('Pushed deployment files');
+
+    const list = all.slice(0, 12).join('\n') + (all.length > 12 ? `\n… and ${all.length - 12} more` : '');
+    this.prompt.note(list, `${all.length} uncommitted change(s)`);
+    const choices: Array<{ value: string; label: string; hint?: string }> = [
+      { value: 'all', label: `Commit and push all changes (${all.length} file${all.length === 1 ? '' : 's'})`, hint: 'recommended' },
+    ];
+    if (deployFiles.length > 0 && codeFiles.length > 0) {
+      choices.push({ value: 'deploy-files', label: `Only deployment files (${deployFiles.join(', ')})`, hint: 'other changes are not deployed' });
+    }
+    if (deployFiles.length === 0) choices.push({ value: 'none', label: 'Deploy the last pushed commit', hint: 'local changes are left out' });
+    choices.push({ value: 'cancel', label: 'Cancel' });
+    const pick = await this.prompt.select(`${names} builds from your git remote. What should be deployed?`, choices);
+    if (pick === 'cancel') throw new UserCancelledError();
+    return pick === 'all' ? all : pick === 'deploy-files' ? deployFiles : [];
   }
 }

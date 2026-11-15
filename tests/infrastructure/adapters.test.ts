@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -6,7 +6,8 @@ import { ConfigError } from '../../src/domain/index.js';
 import { JsonConfigRepository } from '../../src/infrastructure/config/JsonConfigRepository.js';
 import { FileCredentialStore } from '../../src/infrastructure/credentials/FileCredentialStore.js';
 import { NodeFileSystem } from '../../src/infrastructure/fs/NodeFileSystem.js';
-import { parseGitHubRemote } from '../../src/infrastructure/git/CliGit.js';
+import { CliGit, parseGitHubRemote, parsePorcelainZ } from '../../src/infrastructure/git/CliGit.js';
+import { ExecaProcessRunner } from '../../src/infrastructure/process/ExecaProcessRunner.js';
 import { FetchHttpClient } from '../../src/infrastructure/http/FetchHttpClient.js';
 
 const tmp = () => mkdtemp(join(tmpdir(), 'omnideploy-test-'));
@@ -51,7 +52,7 @@ describe('JsonConfigRepository', () => {
     const repo = new JsonConfigRepository(new NodeFileSystem());
     await repo.save(dir, { name: 'demo', build: { command: undefined, output: 'dist' }, providers: { netlify: { siteId: 's' } } });
     expect(JSON.parse(await readFile(join(dir, 'omnideploy.json'), 'utf8'))).toEqual({
-      $schema: 'https://unpkg.com/omnideploy/schema.json',
+      $schema: 'https://unpkg.com/omnideploy-cli/schema.json',
       name: 'demo',
       build: { output: 'dist' },
       providers: { netlify: { siteId: 's' } },
@@ -105,4 +106,35 @@ describe('parseGitHubRemote', () => {
     ['https://github.com/acme/acme.github.io.git', { owner: 'acme', repo: 'acme.github.io' }],
     ['https://gitlab.com/acme/app', undefined],
   ])('%s', (url, expected) => expect(parseGitHubRemote(url)).toEqual(expected));
+});
+
+describe('CliGit.dirtyPaths', () => {
+  it('parses porcelain -z, including renames', () => {
+    expect(parsePorcelainZ(' M pom.xml\0?? new file.txt\0R  b.txt\0a.txt\0 D gone.txt\0')).toEqual(['pom.xml', 'new file.txt', 'b.txt', 'gone.txt']);
+  });
+
+  it('keeps the first character of the first path (real git)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'omni-git-'));
+    const proc = new ExecaProcessRunner();
+    const git = new CliGit(proc);
+    const sh = (...args: string[]) => proc.run('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: dir });
+    try {
+      await git.init(dir, 'main');
+      await writeFile(join(dir, 'pom.xml'), '<project/>');
+      await writeFile(join(dir, 'old.txt'), 'x');
+      await sh('add', '-A');
+      await sh('commit', '-qm', 'init');
+      await writeFile(join(dir, 'pom.xml'), '<project>changed</project>');
+      await mkdir(join(dir, 'src'));
+      await writeFile(join(dir, 'src', 'My File.java'), 'class A {}');
+      await rm(join(dir, 'old.txt'));
+
+      const dirty = await git.dirtyPaths(dir);
+      expect(dirty.sort()).toEqual(['old.txt', 'pom.xml', 'src/My File.java']);
+      await git.commit(dir, dirty, 'deploy');
+      expect(await git.dirtyPaths(dir)).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

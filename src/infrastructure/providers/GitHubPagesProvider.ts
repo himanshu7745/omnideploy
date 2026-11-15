@@ -35,6 +35,7 @@ export class GitHubPagesProvider implements DeploymentProvider {
   readonly capabilities: ProviderCapabilities = {
     kinds: ['static'],
     serverLanguages: [],
+    previews: false,
     buildsFromGit: false,
     auth: { envVar: 'GITHUB_TOKEN', tokenUrl: 'https://github.com/settings/tokens/new?scopes=repo&description=omnideploy' },
   };
@@ -145,7 +146,20 @@ export class GitHubPagesProvider implements DeploymentProvider {
     const existing = await this.http.request<PagesInfo>({ url, headers }, { provider: 'GitHub', allowStatus: [404] });
     const source = { branch, path: '/' };
     if (existing.status === 404) {
-      return (await this.http.request<PagesInfo>({ method: 'POST', url, headers, json: { source } }, { provider: 'GitHub', allowStatus: [409] })).data;
+      const created = await this.http.request<PagesInfo & { message?: string }>(
+        { method: 'POST', url, headers, json: { source } },
+        { provider: 'GitHub', allowStatus: [409, 422] },
+      );
+      if (created.status === 422) {
+        throw new DomainError(
+          `GitHub Pages could not be enabled for ${owner}/${repo}: ${created.data.message ?? 'unprocessable'}.`,
+          /plan|private/i.test(created.data.message ?? '')
+            ? 'GitHub Pages on private repositories needs a paid plan. Make the repository public, or deploy to Netlify or Vercel instead.'
+            : `Enable Pages once at https://github.com/${owner}/${repo}/settings/pages, then deploy again.`,
+          'PAGES_UNAVAILABLE',
+        );
+      }
+      return created.data;
     }
     if (existing.data.source?.branch !== branch) {
       await this.http.request({ method: 'PUT', url, headers, json: { source } }, { provider: 'GitHub' });

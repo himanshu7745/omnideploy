@@ -9,3 +9,5 @@ export * from './GitPort.js';
 export * from './ProjectDetector.js';
 export * from './ArtifactGenerator.js';
 export * from './DeploymentProvider.js';
+export * from './RepositoryHostPort.js';
+export * from './BrowserPort.js';

@@ -50,6 +50,7 @@ export class NetlifyProvider implements DeploymentProvider {
   readonly capabilities: ProviderCapabilities = {
     kinds: ['static'],
     serverLanguages: [],
+    previews: true,
     buildsFromGit: false,
     auth: { envVar: 'NETLIFY_AUTH_TOKEN', tokenUrl: 'https://app.netlify.com/user/applications#personal-access-tokens' },
   };
@@ -122,7 +123,10 @@ export class NetlifyProvider implements DeploymentProvider {
   private async ensureSite(ctx: DeployContext): Promise<NetlifySite> {
     const siteId = ctx.options.siteId as string | undefined;
     if (siteId) {
-      return (await this.http.request<NetlifySite>({ url: `${API}/sites/${siteId}`, headers: this.auth(ctx.token) }, { provider: 'Netlify' })).data;
+      const r = await this.http.request<NetlifySite>({ url: `${API}/sites/${siteId}`, headers: this.auth(ctx.token) }, { provider: 'Netlify', allowStatus: [404] });
+      if (r.status !== 404) return r.data;
+      // Deleted in the dashboard: start over instead of failing on every deploy.
+      ctx.logger.warn(`The saved Netlify site ${siteId} no longer exists, so a new one will be created.`);
     }
     ctx.progress('creating site');
     const base = (ctx.options.siteName as string | undefined) ?? ctx.serviceName;

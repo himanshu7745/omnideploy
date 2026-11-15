@@ -5,3 +5,4 @@ export * from './errors/index.js';
 export * from './services/CompatibilityPolicy.js';
 export * from './services/naming.js';
 export * from './services/spa.js';
+export * from './services/secrets.js';

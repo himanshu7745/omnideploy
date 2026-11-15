@@ -41,6 +41,9 @@ Dependencies point inward only. `.dependency-cruiser.cjs` fails if a layer impor
 - New provider, detector or generator: write one class implementing the port and add it to `builtInProviders` / `builtInDetectors` / `builtInGenerators` in that folder's `index.ts`. `domain` and `application` should not need changes.
 - Render's decision between native and Docker is shared: `renderUsesDocker()` in `generators/provider-config/render.ts` is used by both the generator and `RenderProvider`.
 - Update `schema.json` when you add `omnideploy.json` fields. The zod schema in `JsonConfigRepository` must match it.
+- `ProviderCapabilities` drives shared behaviour: `previews` (without it `deploy --preview` fails fast instead of deploying to production), `buildsFromGit` (triggers the git sync in `DeployProject`, which passes the pushed SHA as `DeployContext.pushedCommit`), and `gitHostApps` (apps `RepositoryBootstrapper` tries to grant access to a newly created repo).
+- The README is the user-facing source of truth. When behaviour, flags, options or error messages change, update it in the same change (the provider guide, the at-a-glance table, the troubleshooting table).
+- Providers should recover from stale saved IDs (resource deleted in the dashboard) with a warning rather than failing every deploy; see Netlify `ensureSite` and Render `deploy`.
 
 ## Conventions and gotchas
 

@@ -15,7 +15,7 @@ const schema = z.object({
   providers: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
 });
 
-const SCHEMA_URL = 'https://unpkg.com/omnideploy/schema.json';
+const SCHEMA_URL = 'https://unpkg.com/omnideploy-cli/schema.json';
 
 export class JsonConfigRepository implements ConfigRepositoryPort {
   readonly fileName = 'omnideploy.json';

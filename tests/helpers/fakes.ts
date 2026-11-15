@@ -5,6 +5,9 @@ import type {
   CredentialStorePort,
   FileSystemPort,
   GitPort,
+  RepositoryHostPort,
+  AppAccessResult,
+  BrowserPort,
   GitRemote,
   LoggerPort,
   ProcessRunnerPort,
@@ -66,7 +69,7 @@ export class FakePrompt implements PromptPort {
   confirms: string[] = [];
   constructor(
     readonly interactive = false,
-    private readonly answers: { confirm?: boolean; select?: string; multiselect?: string[]; password?: string } = {},
+    private readonly answers: { confirm?: boolean; select?: string; multiselect?: string[]; password?: string; text?: string | string[] } = {},
   ) {}
   async confirm(message: string) {
     this.confirms.push(message);
@@ -79,7 +82,8 @@ export class FakePrompt implements PromptPort {
     return (this.answers.multiselect as T[]) ?? choices.map((c) => c.value);
   }
   async text() {
-    return '';
+    const t = this.answers.text;
+    return (Array.isArray(t) ? t.shift() : t) ?? '';
   }
   async password() {
     return this.answers.password ?? '';
@@ -133,13 +137,42 @@ export class MemoryConfigRepo implements ConfigRepositoryPort {
 export class FakeGit implements GitPort {
   commits: Array<{ paths: string[]; message: string }> = [];
   pushes = 0;
+  pushAuth: Array<{ token: string } | undefined> = [];
   published: Array<{ dir: string; remoteUrl: string; branch: string }> = [];
+  inited: string[] = [];
+  /** Local commits not on the remote; null = branch has no upstream. */
+  unpushed: number | null = 0;
+  pushError?: Error;
   constructor(
     public remoteInfo: GitRemote | null = { url: 'git@github.com:acme/app.git', github: { owner: 'acme', repo: 'app' } },
     public dirty: string[] = [],
+    public repo = remoteInfo !== null,
+    public committed = repo,
   ) {}
   async isRepo() {
-    return this.remoteInfo !== null;
+    return this.repo;
+  }
+  async init(_d: string, branch: string) {
+    this.repo = true;
+    this.inited.push(branch);
+  }
+  head: string | null = 'abc1234';
+  async headCommit() {
+    return this.head;
+  }
+  async unpushedCommits() {
+    return this.unpushed;
+  }
+  async hasCommits() {
+    return this.committed;
+  }
+  async commitAll(_d: string, message: string) {
+    this.commits.push({ paths: [...this.dirty], message });
+    this.dirty = [];
+    this.committed = true;
+  }
+  async addRemote(_d: string, _name: string, url: string) {
+    this.remoteInfo = { url };
   }
   async remote() {
     return this.remoteInfo;
@@ -154,11 +187,44 @@ export class FakeGit implements GitPort {
     this.commits.push({ paths, message });
     this.dirty = this.dirty.filter((d) => !paths.includes(d));
   }
-  async push() {
+  async push(_d?: string, _r?: string, _b?: string, auth?: { token: string }) {
+    if (this.pushError) throw this.pushError;
     this.pushes++;
+    this.pushAuth.push(auth);
   }
   async publishDirectory(dir: string, remoteUrl: string, branch: string) {
     this.published.push({ dir, remoteUrl, branch });
+  }
+}
+
+export class FakeRepoHost implements RepositoryHostPort {
+  readonly id = 'github';
+  readonly displayName = 'GitHub';
+  readonly auth = { envVar: 'GITHUB_TOKEN', tokenUrl: 'https://github.test/tokens' };
+  created: Array<{ token: string; name: string; private: boolean }> = [];
+  grants: string[] = [];
+  constructor(
+    public cliToken: string | null = null,
+    public grantResult: AppAccessResult = 'granted',
+  ) {}
+  async grantAppAccess(_t: string, repo: { owner: string; name: string }, app: string) {
+    this.grants.push(`${app}:${repo.owner}/${repo.name}`);
+    return this.grantResult;
+  }
+  async detectToken() {
+    return this.cliToken;
+  }
+  async createRepository(token: string, opts: { name: string; private: boolean }) {
+    this.created.push({ token, ...opts });
+    return { id: 42, owner: 'me', name: opts.name, cloneUrl: `https://github.com/me/${opts.name}.git`, webUrl: `https://github.com/me/${opts.name}` };
+  }
+}
+
+export class FakeBrowser implements BrowserPort {
+  opened: string[] = [];
+  async open(url: string) {
+    this.opened.push(url);
+    return true;
   }
 }
 

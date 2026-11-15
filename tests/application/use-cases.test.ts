@@ -6,12 +6,16 @@ import {
   DetectProject,
   GenerateArtifacts,
   InitProject,
+  LoginProvider,
+  LogoutProvider,
   ProviderRegistry,
+  RepositoryBootstrapper,
 } from '../../src/application/index.js';
 import {
   DomainError,
   IncompatibleProviderError,
   MissingCredentialError,
+  RepoAccessError,
   type ArtifactGenerator,
   type DeployContext,
   type DeploymentProvider,
@@ -19,7 +23,7 @@ import {
   type ProjectProfile,
   type ProviderCapabilities,
 } from '../../src/domain/index.js';
-import { FakeGit, FakeProcess, FakePrompt, MemoryConfigRepo, MemoryCredentials, MemoryFs, MemoryLogger } from '../helpers/fakes.js';
+import { FakeBrowser, FakeGit, FakeProcess, FakePrompt, FakeRepoHost, MemoryConfigRepo, MemoryCredentials, MemoryFs, MemoryLogger } from '../helpers/fakes.js';
 
 const ROOT = '/work/app';
 
@@ -47,6 +51,8 @@ class StubGenerator implements ArtifactGenerator {
 class StubProvider implements DeploymentProvider {
   deployed: DeployContext[] = [];
   fail = false;
+  /** Number of deploy attempts that fail with RepoAccessError before succeeding. */
+  noRepoAccess = 0;
   constructor(
     readonly id: string,
     readonly displayName: string,
@@ -60,20 +66,28 @@ class StubProvider implements DeploymentProvider {
   async deploy(ctx: DeployContext) {
     this.deployed.push(ctx);
     if (this.fail) throw new DomainError('boom');
+    if (this.noRepoAccess-- > 0) throw new RepoAccessError(this.displayName, 'https://github.com/me/demo', 'https://github.com/apps/render/installations/new', 'grant it');
     return { provider: this.id, id: 'd1', url: `https://${ctx.serviceName}.${this.id}.test`, state: 'ready' as const, configUpdates: { siteId: 'site-1' } };
   }
 }
 
 const auth = (id: string) => ({ envVar: `${id.toUpperCase()}_TOKEN`, tokenUrl: `https://${id}.test/tokens` });
 
-function setup(opts: { profile: Partial<ProjectProfile> | null; tokens?: Record<string, string>; prompt?: FakePrompt; config?: MemoryConfigRepo; git?: FakeGit }) {
+function setup(opts: {
+  profile: Partial<ProjectProfile> | null;
+  tokens?: Record<string, string>;
+  prompt?: FakePrompt;
+  config?: MemoryConfigRepo;
+  git?: FakeGit;
+  repoHost?: FakeRepoHost;
+}) {
   const fs = new MemoryFs(new Map([[`${ROOT}/dist/index.html`, '<h1>hi</h1>']]));
   const logger = new MemoryLogger();
   const prompt = opts.prompt ?? new FakePrompt(false);
   const configRepo = opts.config ?? new MemoryConfigRepo();
   const git = opts.git ?? new FakeGit();
   const proc = new FakeProcess();
-  const staticHost = new StubProvider('netlify', 'Netlify', { kinds: ['static'], serverLanguages: [], buildsFromGit: false, auth: auth('netlify') }, ['netlify-toml']);
+  const staticHost = new StubProvider('netlify', 'Netlify', { kinds: ['static'], serverLanguages: [], previews: true, buildsFromGit: false, auth: auth('netlify') }, ['netlify-toml']);
   const gitHost = new StubProvider(
     'render',
     'Render',
@@ -86,19 +100,24 @@ function setup(opts: { profile: Partial<ProjectProfile> | null; tokens?: Record<
 
   const detect = new DetectProject([new StubDetector(opts.profile)], configRepo);
   const generate = new GenerateArtifacts(generators, registry, fs, prompt, logger);
+  const credentials = new CredentialResolver(new MemoryCredentials(opts.tokens ?? { netlify: 't-n', render: 't-r', railway: 't-rw' }), prompt);
+  const repoHost = opts.repoHost ?? new FakeRepoHost('gh-cli-token');
+  const browser = new FakeBrowser();
   const deploy = new DeployProject(
     detect,
     registry,
     generate,
     new BuildProject(proc, fs, logger),
-    new CredentialResolver(new MemoryCredentials(opts.tokens ?? { netlify: 't-n', render: 't-r', railway: 't-rw' }), prompt),
+    credentials,
     configRepo,
     git,
+    new RepositoryBootstrapper(git, repoHost, fs, credentials, prompt, logger),
     prompt,
     logger,
+    browser,
   );
   const init = new InitProject(detect, registry, generate, configRepo, prompt, logger);
-  return { fs, logger, prompt, configRepo, git, proc, staticHost, gitHost, containerHost, deploy, init, generate };
+  return { fs, logger, prompt, configRepo, git, repoHost, browser, proc, staticHost, gitHost, containerHost, deploy, init, generate };
 }
 
 const JAVA: Partial<ProjectProfile> = { language: 'java', framework: 'spring-boot', kind: 'server', port: 8080, meta: { name: 'demo-api' } };
@@ -171,9 +190,66 @@ describe('DeployProject', () => {
     ]);
   });
 
-  it('requires a git remote for git-based providers', async () => {
-    const s = setup({ profile: JAVA, git: new FakeGit(null) });
-    await expect(s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true })).rejects.toThrow(/no git remote/);
+  it('creates a private GitHub repo, commits and pushes when there is no git repository (--yes)', async () => {
+    const git = new FakeGit(null, ['src/Main.java', 'pom.xml']);
+    const s = setup({ profile: JAVA, git });
+    await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true });
+
+    expect(s.fs.files.get(`${ROOT}/.gitignore`)).toContain('.env');
+    expect(git.inited).toEqual(['main']);
+    expect(git.commits[0]).toEqual({ paths: ['src/Main.java', 'pom.xml'], message: 'Initial commit (omnideploy)' });
+    expect(s.repoHost.created).toEqual([{ token: 'gh-cli-token', name: 'demo-api', private: true }]);
+    expect(git.remoteInfo?.url).toBe('https://github.com/me/demo-api.git');
+    expect(git.pushAuth).toEqual([{ token: 'gh-cli-token' }]);
+    expect(s.gitHost.deployed).toHaveLength(1);
+  });
+
+  it("tries to give the provider's git app access to the new repo, and carries on quietly if it cannot", async () => {
+    const s = setup({ profile: JAVA, git: new FakeGit(null, ['pom.xml']), repoHost: new FakeRepoHost('t', 'unavailable') });
+    s.gitHost.capabilities.gitHostApps = { github: 'render' };
+    await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true });
+    expect(s.repoHost.grants).toEqual(['render:me/demo-api']);
+    expect(s.logger.lines.some((l) => l.startsWith('warn:'))).toBe(false);
+    expect(s.gitHost.deployed).toHaveLength(1);
+  });
+
+  it('pushes an existing local repository without a remote, committing generated files first', async () => {
+    const git = new FakeGit(null, ['Dockerfile', 'render.yaml'], true);
+    const s = setup({ profile: JAVA, git, tokens: { render: 't-r', github: 'stored-gh' } });
+    await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true });
+
+    expect(git.inited).toEqual([]);
+    expect(s.fs.files.has(`${ROOT}/.gitignore`)).toBe(false);
+    expect(git.commits.map((c) => c.message)).toEqual(['chore: add deployment configuration (omnideploy)']);
+    expect(s.repoHost.created[0]!.token).toBe('stored-gh');
+    expect(git.pushes).toBe(1);
+  });
+
+  it('asks before creating a repository when interactive', async () => {
+    const prompt = new FakePrompt(true, { confirm: false });
+    const s = setup({ profile: { ...JAVA, hasDockerfile: true }, git: new FakeGit(null), prompt });
+    s.fs.files.set(`${ROOT}/Dockerfile`, 'FROM x');
+    s.fs.files.set(`${ROOT}/render.yaml`, 'services: []');
+    await expect(s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true })).rejects.toThrow(/no git remote/);
+    expect(prompt.confirms.some((c) => /Create a private GitHub repository/.test(c))).toBe(true);
+    expect(s.repoHost.created).toHaveLength(0);
+  });
+
+  it('explains how to proceed without a remote when not interactive and no --yes', async () => {
+    const s = setup({ profile: { ...JAVA, hasDockerfile: true }, git: new FakeGit(null) });
+    s.fs.files.set(`${ROOT}/Dockerfile`, 'FROM x');
+    s.fs.files.set(`${ROOT}/render.yaml`, 'services: []');
+    const err = await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true }).catch((e) => e);
+    expect(err.code).toBe('NO_GIT_REMOTE');
+    expect(err.hint).toMatch(/--yes/);
+  });
+
+  it('refuses to auto-commit files that look like secrets, before creating anything remotely', async () => {
+    const git = new FakeGit(null, ['app.py', '.env', '.env.example']);
+    const s = setup({ profile: JAVA, git });
+    await expect(s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true })).rejects.toThrow(/secrets: \.env\./);
+    expect(s.repoHost.created).toHaveLength(0);
+    expect(git.commits).toHaveLength(0);
   });
 
   it('dry run plans without writing, building or deploying', async () => {
@@ -229,5 +305,180 @@ describe('GenerateArtifacts', () => {
     await expect(
       s.generate.plan({ profile: { rootDir: ROOT, language: 'docker', kind: 'server', port: 80, hasDockerfile: false }, config: null, providerIds: ['railway'] }),
     ).rejects.toThrow(/no template/);
+  });
+});
+
+describe('DeployProject edge cases', () => {
+  it('--preview on a provider without previews fails before touching anything', async () => {
+    const s = setup({ profile: JAVA });
+    const err = await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: false, yes: true }).catch((e) => e);
+    expect(err.code).toBe('PREVIEW_UNSUPPORTED');
+    expect(err.hint).toBe('Drop --preview to deploy to production.');
+    expect(s.fs.files.has(`${ROOT}/Dockerfile`)).toBe(false);
+    expect(s.gitHost.deployed).toHaveLength(0);
+  });
+
+  it('--preview suggests a provider that has previews', async () => {
+    const s = setup({ profile: VITE });
+    const err = await s.deploy.execute({ rootDir: ROOT, providerIds: ['railway'], production: false, yes: true }).catch((e) => e);
+    expect(err.hint).toBe('Drop --preview to deploy to production, or preview on Netlify.');
+  });
+
+  it('tells git-based providers which commit it pushed', async () => {
+    const git = new FakeGit(undefined, ['src/App.java']);
+    git.head = 'f00dcafe';
+    const s = setup({ profile: { ...JAVA, hasDockerfile: true }, git });
+    s.fs.files.set(`${ROOT}/Dockerfile`, 'FROM x');
+    s.fs.files.set(`${ROOT}/render.yaml`, 'services: []');
+    await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true });
+    expect(s.gitHost.deployed[0]!.pushedCommit).toBe('f00dcafe');
+  });
+
+  it('does not claim a push when the remote was already up to date', async () => {
+    const s = setup({ profile: { ...JAVA, hasDockerfile: true } });
+    s.fs.files.set(`${ROOT}/Dockerfile`, 'FROM x');
+    s.fs.files.set(`${ROOT}/render.yaml`, 'services: []');
+    await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true });
+    expect(s.gitHost.deployed[0]!.pushedCommit).toBeUndefined();
+  });
+
+  it('refuses to upload an empty build output folder', async () => {
+    const s = setup({ profile: { ...VITE, buildCommand: undefined, outputDir: 'out' } });
+    s.fs.files.set(`${ROOT}/out`, ''); // an existing but empty directory
+    const err = await s.deploy.execute({ rootDir: ROOT, providerIds: ['netlify'], production: true, yes: true }).catch((e) => e);
+    expect(err.code).toBe('EMPTY_OUTPUT');
+    expect(s.staticHost.deployed).toHaveLength(0);
+  });
+});
+
+describe('DeployProject git sync (redeploys)', () => {
+  const RENDER = { ...JAVA, hasDockerfile: true };
+  const withFiles = (git: FakeGit, prompt: FakePrompt) => {
+    const s = setup({ profile: RENDER, git, prompt });
+    s.fs.files.set(`${ROOT}/Dockerfile`, 'FROM x');
+    s.fs.files.set(`${ROOT}/render.yaml`, 'services: []');
+    return s;
+  };
+  const run = (s: ReturnType<typeof setup>, yes = false) => s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes });
+
+  it('commits and pushes code changes too, by default', async () => {
+    const git = new FakeGit(undefined, ['render.yaml', 'src/App.java', 'pom.xml']);
+    const s = withFiles(git, new FakePrompt(true, { select: 'all' }));
+    await run(s);
+    expect(git.commits).toEqual([{ paths: ['render.yaml', 'src/App.java', 'pom.xml'], message: 'Deploy with omnideploy' }]);
+    expect(git.pushes).toBe(1);
+    expect(s.prompt.notes.some((n) => n.title === '3 uncommitted change(s)')).toBe(true);
+  });
+
+  it('can commit only the deployment files', async () => {
+    const git = new FakeGit(undefined, ['render.yaml', 'src/App.java']);
+    await run(withFiles(git, new FakePrompt(true, { select: 'deploy-files' })));
+    expect(git.commits).toEqual([{ paths: ['render.yaml'], message: 'chore: add deployment configuration (omnideploy)' }]);
+    expect(git.pushes).toBe(1);
+  });
+
+  it('can deploy the last pushed commit without pushing', async () => {
+    const git = new FakeGit(undefined, ['src/App.java']);
+    const s = withFiles(git, new FakePrompt(true, { select: 'none' }));
+    await run(s);
+    expect(git.commits).toEqual([]);
+    expect(git.pushes).toBe(0);
+    expect(s.gitHost.deployed).toHaveLength(1);
+  });
+
+  it('pushes local commits that were never pushed', async () => {
+    const git = new FakeGit(undefined, []);
+    git.unpushed = 2;
+    const s = withFiles(git, new FakePrompt(true, { confirm: true }));
+    await run(s);
+    expect(s.prompt.confirms).toContain('Render builds from your git remote. Push 2 local commit(s) so it gets deployed?');
+    expect(git.pushes).toBe(1);
+  });
+
+  it('does nothing when the remote is already up to date', async () => {
+    const git = new FakeGit(undefined, []);
+    const s = withFiles(git, new FakePrompt(true));
+    await run(s);
+    expect(git.pushes).toBe(0);
+    expect(s.prompt.confirms).toEqual([]);
+  });
+
+  it('--yes commits everything except files that look like secrets', async () => {
+    const git = new FakeGit(undefined, ['src/App.java', '.env', 'config/server.key', '.env.example']);
+    const s = withFiles(git, new FakePrompt(false));
+    await run(s, true);
+    expect(git.commits[0]!.paths).toEqual(['src/App.java', '.env.example']);
+    expect(s.logger.lines).toContain('warn: Not committing files that look like secrets: .env, config/server.key (add them to .gitignore).');
+  });
+
+  it('explains a rejected push', async () => {
+    const git = new FakeGit(undefined, ['src/App.java']);
+    git.pushError = new DomainError('git push failed: ! [rejected] main -> main (fetch first)');
+    const err = await run(withFiles(git, new FakePrompt(false)), true).catch((e) => e);
+    expect(err.code).toBe('GIT_PUSH_REJECTED');
+    expect(err.hint).toMatch(/git pull --rebase/);
+  });
+
+  it('non-interactive without --yes says how to proceed', async () => {
+    const err = await run(withFiles(new FakeGit(undefined, ['src/App.java']), new FakePrompt(false))).catch((e) => e);
+    expect(err.code).toBe('GIT_SYNC_REQUIRED');
+    expect(err.hint).toMatch(/--yes/);
+  });
+});
+
+describe('DeployProject repository access', () => {
+  const ready = (prompt: FakePrompt) => {
+    const s = setup({ profile: { ...JAVA, hasDockerfile: true }, prompt });
+    s.fs.files.set(`${ROOT}/Dockerfile`, 'FROM x');
+    s.fs.files.set(`${ROOT}/render.yaml`, 'services: []');
+    s.gitHost.noRepoAccess = 1;
+    return s;
+  };
+
+  it('yes: opens the grant page, waits, and retries the deploy', async () => {
+    const prompt = new FakePrompt(true, { confirm: true });
+    const s = ready(prompt);
+    const report = await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true });
+    expect(prompt.confirms).toContain('Render needs access to me/demo. Open the page to grant it and continue deploying?');
+    expect(s.browser.opened).toEqual(['https://github.com/apps/render/installations/new']);
+    expect(s.gitHost.deployed).toHaveLength(2);
+    expect(report.outcomes[0]!.ok).toBe(true);
+  });
+
+  it('no: does not deploy', async () => {
+    const prompt = new FakePrompt(true, { confirm: false });
+    const s = ready(prompt);
+    const report = await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, force: false }).catch((e) => e);
+    // confirm=false also declines writing files, so files are pre-created; the deploy outcome is a cancellation.
+    expect(s.browser.opened).toEqual([]);
+    expect(s.gitHost.deployed).toHaveLength(1);
+    expect(report.outcomes[0]).toMatchObject({ ok: false, error: expect.objectContaining({ message: 'Deployment to Render cancelled.' }) });
+  });
+
+  it('--yes / CI: never prompts, reports the access error with its hint', async () => {
+    const s = ready(new FakePrompt(true));
+    const report = await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true });
+    expect(s.browser.opened).toEqual([]);
+    expect(report.outcomes[0]!.error).toBeInstanceOf(RepoAccessError);
+  });
+});
+
+describe('LoginProvider / LogoutProvider', () => {
+  const github = { id: 'github', displayName: 'GitHub', auth: { envVar: 'GITHUB_TOKEN', tokenUrl: 'https://github.test' } };
+  const registry = () => new ProviderRegistry([]);
+
+  it('saves, replaces and removes the github repository-host token', async () => {
+    const store = new MemoryCredentials();
+    const login = new LoginProvider(registry(), store, new FakePrompt(false), [github]);
+    await login.execute('github', 'old');
+    await login.execute('github', ' new ');
+    expect(store.tokens.github).toBe('new');
+    expect(await new LogoutProvider(registry(), store, [github]).execute('github')).toEqual({ subject: github, removed: true });
+    expect(store.tokens.github).toBeUndefined();
+  });
+
+  it('lists github among known ids for an unknown one', async () => {
+    const err = await new LogoutProvider(registry(), new MemoryCredentials(), [github]).execute('gitlab').catch((e) => e);
+    expect(err.hint).toMatch(/github/);
   });
 });

@@ -13,6 +13,8 @@ export interface DeployContext {
   sourceDir: string;
   production: boolean;
   serviceName: string;
+  /** Commit omnideploy pushed in this run (git-based providers may already be auto-deploying it). */
+  pushedCommit?: string;
   logger: LoggerPort;
   /** Report progress to the spinner. */
   progress(message: string): void;
