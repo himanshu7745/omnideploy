@@ -13,7 +13,7 @@ import {
   type ProviderCapabilities,
   type ProviderContext,
 } from '../../domain/index.js';
-import { DEFAULT_POLL, poll, sha1, type InMemoryFile, type PollOptions } from './support.js';
+import { DEFAULT_POLL, filesToUpload, poll, sha1, type InMemoryFile, type PollOptions } from './support.js';
 
 const API = 'https://api.vercel.com';
 
@@ -71,14 +71,19 @@ export class VercelProvider implements DeploymentProvider {
     const name = (ctx.options.project as string | undefined) ?? ctx.serviceName;
     const query = { teamId: ctx.options.teamId as string | undefined, skipAutoDetectionConfirmation: 1 };
     const manifest = files.map((f) => ({ file: f.path, sha: sha1(f.data), size: f.data.byteLength }));
-    const projectId = ctx.options.projectId as string | undefined;
+    let projectId = ctx.options.projectId as string | undefined;
+    // Framework apps are built on Vercel, so their variables must exist on the project before the build starts.
+    if (!isStatic && Object.keys(ctx.env).length > 0) {
+      projectId ??= await this.ensureProject(ctx, name, query.teamId);
+      await this.setEnv(ctx, projectId, query.teamId);
+    }
     const body = {
       name,
       // Once known, deploy by ID so a project renamed in the dashboard keeps receiving deploys.
       ...(projectId ? { project: projectId } : {}),
       files: manifest,
       target: ctx.production ? 'production' : undefined,
-      projectSettings: isStatic ? { framework: null } : { framework: ctx.profile.framework === 'nextjs' ? 'nextjs' : ctx.profile.framework },
+      projectSettings: { framework: isStatic ? null : vercelFramework(ctx.profile.framework) },
     };
 
     ctx.progress(`creating deployment (${files.length} files)`);
@@ -143,8 +148,12 @@ export class VercelProvider implements DeploymentProvider {
   private async collect(ctx: DeployContext, isStatic: boolean): Promise<InMemoryFile[]> {
     const root = ctx.profile.rootDir;
     const paths = isStatic
-      ? await this.fs.collectFiles(ctx.sourceDir)
-      : await this.fs.collectFiles(root, { respectGitignore: true, ignore: SOURCE_IGNORES });
+      ? await filesToUpload(this.fs, ctx.sourceDir, ctx.logger)
+      : await filesToUpload(this.fs, root, ctx.logger, {
+          respectGitignore: true,
+          ignore: SOURCE_IGNORES,
+          why: 'they look like secrets; set the values as Vercel environment variables instead',
+        });
     const base = isStatic ? ctx.sourceDir : root;
     const files = await Promise.all(paths.map(async (p) => ({ path: p, data: await this.fs.readBytes(this.fs.join(base, p)) })));
     // A root vercel.json (e.g. SPA rewrites) applies to prebuilt static output too.
@@ -153,6 +162,42 @@ export class VercelProvider implements DeploymentProvider {
       if (cfg) files.push({ path: 'vercel.json', data: new TextEncoder().encode(cfg) });
     }
     return files;
+  }
+
+  /** The project for `name`, created if it doesn't exist yet (normally the first deployment creates it). */
+  private async ensureProject(ctx: DeployContext, name: string, teamId?: string): Promise<string> {
+    const found = await this.http.request<{ id: string }>(
+      { url: `${API}/v9/projects/${encodeURIComponent(name)}`, headers: this.auth(ctx.token), query: { teamId } },
+      { provider: 'Vercel', allowStatus: [404] },
+    );
+    if (found.status !== 404) return found.data.id;
+    ctx.progress('creating project');
+    const created = await this.http.request<{ id: string }>(
+      { method: 'POST', url: `${API}/v11/projects`, headers: this.auth(ctx.token), query: { teamId }, json: { name } },
+      { provider: 'Vercel' },
+    );
+    return created.data.id;
+  }
+
+  /** Upserts .env.production into the project (encrypted; production and preview). */
+  private async setEnv(ctx: DeployContext, projectId: string, teamId?: string): Promise<void> {
+    ctx.progress('setting environment variables');
+    const r = await this.http.request<{ failed?: Array<{ error: { key?: string; envVarKey?: string; message: string } }> }>(
+      {
+        method: 'POST',
+        url: `${API}/v10/projects/${projectId}/env`,
+        headers: this.auth(ctx.token),
+        query: { upsert: 'true', teamId },
+        json: Object.entries(ctx.env).map(([key, value]) => ({ key, value, type: 'encrypted', target: ['production', 'preview'] })),
+      },
+      { provider: 'Vercel' },
+    );
+    const failed = r.data.failed ?? [];
+    if (failed.length > 0) {
+      const detail = failed.map((f) => `${f.error.key ?? f.error.envVarKey ?? '?'}: ${f.error.message}`).join('; ');
+      throw new ProviderApiError('Vercel', `could not set environment variables (${detail})`, undefined, 'Check the names in .env.production, or set them in the Vercel dashboard (Project → Settings → Environment Variables).');
+    }
+    ctx.logger.info(`Vercel: set ${Object.keys(ctx.env).length} environment variable(s) from .env.production (${Object.keys(ctx.env).join(', ')}).`);
   }
 
   private async upload(ctx: DeployContext, files: InMemoryFile[], teamId?: string): Promise<void> {
@@ -184,4 +229,10 @@ export class VercelProvider implements DeploymentProvider {
   private auth(token: string) {
     return { authorization: `Bearer ${token}` };
   }
+}
+
+/** Vercel's framework identifiers differ from omnideploy's for some frameworks. */
+function vercelFramework(framework?: string): string | null {
+  const map: Record<string, string> = { nextjs: 'nextjs', nuxt: 'nuxtjs', sveltekit: 'sveltekit-1', remix: 'remix', astro: 'astro' };
+  return framework ? (map[framework] ?? null) : null;
 }

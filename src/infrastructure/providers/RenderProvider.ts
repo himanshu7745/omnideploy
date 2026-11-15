@@ -92,7 +92,11 @@ export class RenderProvider implements DeploymentProvider {
 
     if (serviceId) {
       const existing = await this.findServiceById(ctx.token, serviceId);
-      if (existing) deployId = await this.startDeploy(ctx, existing);
+      if (existing) {
+        // A build that already started (auto-deploy of the push) would run with the old variables.
+        const envChanged = await this.syncEnv(ctx, existing.id);
+        deployId = await this.startDeploy(ctx, existing, !envChanged);
+      }
       else {
         // Deleted in the dashboard: start over instead of failing on every deploy.
         ctx.logger.warn(`The saved Render service ${serviceId} no longer exists, so a new one will be created.`);
@@ -146,8 +150,8 @@ export class RenderProvider implements DeploymentProvider {
   }
 
   /** Starts a deploy of an existing service, or joins the one Render's auto-deploy started for our push. */
-  private async startDeploy(ctx: DeployContext, service: RenderService): Promise<string> {
-    if (ctx.pushedCommit && service.autoDeploy !== 'no') {
+  private async startDeploy(ctx: DeployContext, service: RenderService, followAutoDeploy = true): Promise<string> {
+    if (followAutoDeploy && ctx.pushedCommit && service.autoDeploy !== 'no') {
       ctx.progress('waiting for Render to pick up the push');
       const { value } = await poll(
         () => this.recentDeploys(ctx.token, service.id),
@@ -172,6 +176,39 @@ export class RenderProvider implements DeploymentProvider {
     const [latest] = await this.recentDeploys(ctx.token, service.id);
     if (!latest) throw new DeploymentFailedError('Render', 'the deploy was queued but could not be found', service.dashboardUrl);
     return latest.id;
+  }
+
+  /**
+   * Adds/updates the service's variables from .env.production. Render's API replaces the whole list,
+   * so the current variables are read first and kept. Returns true if anything changed.
+   */
+  private async syncEnv(ctx: DeployContext, serviceId: string): Promise<boolean> {
+    const wanted = Object.entries(ctx.env);
+    if (wanted.length === 0) return false;
+    const current = new Map<string, string>();
+    for (let cursor: string | undefined; ; ) {
+      const r = await this.http.request<Array<{ envVar: { key: string; value: string }; cursor: string }>>(
+        { url: `${API}/services/${serviceId}/env-vars`, headers: this.auth(ctx.token), query: { limit: 100, cursor } },
+        { provider: 'Render' },
+      );
+      for (const { envVar } of r.data) current.set(envVar.key, envVar.value);
+      if (r.data.length < 100) break;
+      cursor = r.data.at(-1)!.cursor;
+    }
+    const added = wanted.filter(([k]) => !current.has(k)).map(([k]) => k);
+    const updated = wanted.filter(([k, v]) => current.has(k) && current.get(k) !== v).map(([k]) => k);
+    if (added.length === 0 && updated.length === 0) {
+      ctx.logger.info('Render: environment variables already match .env.production.');
+      return false;
+    }
+    ctx.progress('setting environment variables');
+    for (const [k, v] of wanted) current.set(k, v);
+    await this.http.request(
+      { method: 'PUT', url: `${API}/services/${serviceId}/env-vars`, headers: this.auth(ctx.token), json: [...current].map(([key, value]) => ({ key, value })) },
+      { provider: 'Render' },
+    );
+    ctx.logger.info(`Render: ${describeEnvChange(added, updated)} from .env.production.`);
+    return true;
   }
 
   private async recentDeploys(token: string, serviceId: string): Promise<RenderDeploy[]> {
@@ -251,6 +288,8 @@ export class RenderProvider implements DeploymentProvider {
               branch,
               autoDeploy: 'yes',
               serviceDetails,
+              // Set before the first build, so it already has them.
+              ...(Object.keys(ctx.env).length > 0 ? { envVars: Object.entries(ctx.env).map(([key, value]) => ({ key, value })) } : {}),
             },
           },
           { provider: 'Render' },
@@ -262,7 +301,8 @@ export class RenderProvider implements DeploymentProvider {
           const existing = await this.findService(ctx.token, ownerId, name);
           if (existing && sameRepo(existing.repo, repo)) {
             ctx.logger.info(`Using the existing Render service "${name}" (it builds this repo).`);
-            return { service: existing, deployId: await this.startDeploy(ctx, existing), adopted: true };
+            const envChanged = await this.syncEnv(ctx, existing.id);
+            return { service: existing, deployId: await this.startDeploy(ctx, existing, !envChanged), adopted: true };
           }
           continue;
         }
@@ -299,6 +339,10 @@ export class RenderProvider implements DeploymentProvider {
   private auth(token: string) {
     return { authorization: `Bearer ${token}` };
   }
+}
+
+function describeEnvChange(added: string[], updated: string[]): string {
+  return [added.length && `added ${added.join(', ')}`, updated.length && `updated ${updated.join(', ')}`].filter(Boolean).join('; ');
 }
 
 const normRepo = (u?: string) => (u ?? '').toLowerCase().replace(/\.git$/, '').replace(/\/$/, '');

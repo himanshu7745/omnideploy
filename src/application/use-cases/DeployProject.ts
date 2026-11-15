@@ -20,6 +20,8 @@ import {
 import type { CredentialResolver } from '../services/CredentialResolver.js';
 import type { ProviderRegistry } from '../services/ProviderRegistry.js';
 import type { RepositoryBootstrapper } from '../services/RepositoryBootstrapper.js';
+import type { ProductionEnvironment } from '../services/ProductionEnvironment.js';
+import type { SecretGuard } from '../services/SecretGuard.js';
 import { resolveServiceName } from '../services/serviceName.js';
 import type { BuildProject } from './BuildProject.js';
 import type { DetectProject } from './DetectProject.js';
@@ -69,6 +71,8 @@ export class DeployProject {
     private readonly prompt: PromptPort,
     private readonly logger: LoggerPort,
     private readonly browser: BrowserPort,
+    private readonly secrets: SecretGuard,
+    private readonly productionEnv: ProductionEnvironment,
   ) {}
 
   async execute(req: DeployRequest): Promise<DeployReport> {
@@ -96,6 +100,13 @@ export class DeployProject {
         );
       }
     }
+
+    // .env.production is the single source of truth for production variables; stop now if one the app needs is missing.
+    const env = await this.productionEnv.load(req.rootDir, config, {
+      yes: req.yes,
+      dryRun: req.dryRun,
+      forWhat: targets.map((p) => p.displayName).join(', '),
+    });
 
     // 2. Deployment files (Dockerfile, render.yaml, ...).
     const { planned, written } = await this.generate.execute({
@@ -132,7 +143,7 @@ export class DeployProject {
     }
 
     // 5. Build once (static sites only), then deploy to each target.
-    const sourceDir = await this.build.execute(profile, { skipBuild: req.skipBuild, spinner: this.prompt.spinner() });
+    const sourceDir = await this.build.execute(profile, { skipBuild: req.skipBuild, spinner: this.prompt.spinner(), env: env.vars });
     const serviceName = resolveServiceName(profile, config);
     const outcomes: ProviderOutcome[] = [];
 
@@ -148,6 +159,7 @@ export class DeployProject {
             sourceDir,
             production: req.production,
             serviceName,
+            env: env.vars,
             pushedCommit,
             logger: this.logger,
             progress: (m) => spinner.message(`${p.displayName}: ${m}`),
@@ -229,18 +241,25 @@ export class DeployProject {
       hostApps: targets.map((p) => p.capabilities.gitHostApps),
     });
 
+    await this.warnAboutCommittedSecrets(req.rootDir, names);
     const dirty = await this.git.dirtyPaths(req.rootDir);
-    const secrets = dirty.filter(looksLikeSecret);
-    const changed = dirty.filter((d) => !secrets.includes(d));
+    // Secret files (.env, keys) are never offered for commit.
+    const secretFiles = dirty.filter(looksLikeSecret);
+    const changed = dirty.filter((d) => !secretFiles.includes(d));
     const deployFiles = changed.filter((d) => generated.includes(d) || ['Dockerfile', '.dockerignore', 'render.yaml', 'omnideploy.json'].includes(d));
     const codeFiles = changed.filter((d) => !deployFiles.includes(d));
     const unpushed = created ? 0 : await this.git.unpushedCommits(req.rootDir); // null: branch never pushed
-    if (secrets.length > 0) this.logger.warn(`Not committing files that look like secrets: ${secrets.join(', ')} (add them to .gitignore).`);
 
     const needsPush = created !== null || unpushed === null || unpushed > 0;
     if (changed.length === 0 && !needsPush) return undefined; // the remote already has everything
 
-    const toCommit = await this.chooseCommit(req, names, deployFiles, codeFiles, unpushed, created !== null);
+    let toCommit = await this.chooseCommit(req, names, deployFiles, codeFiles, unpushed, created !== null);
+    if (toCommit.length > 0) {
+      // Last check before anything is committed: secret files → .gitignore, hard-coded secrets → user decides.
+      const { exclude, ignored } = await this.secrets.review(req.rootDir, [...toCommit, ...secretFiles], { yes: req.yes });
+      toCommit = toCommit.filter((f) => !exclude.includes(f));
+      if (ignored.length > 0 && !toCommit.includes('.gitignore')) toCommit.push('.gitignore');
+    }
     if (toCommit.length > 0) {
       const message = toCommit.some((f) => codeFiles.includes(f)) ? 'Deploy with omnideploy' : 'chore: add deployment configuration (omnideploy)';
       await this.git.commit(req.rootDir, toCommit, message);
@@ -262,6 +281,17 @@ export class DeployProject {
     }
     this.logger.success(created ? `Pushed to ${created.webUrl}` : `Pushed — ${names} will build the latest commit`);
     return (await this.git.headCommit(req.rootDir)) ?? undefined;
+  }
+
+  /** Secret files committed in the past are already on the remote — say so once per deploy, with the fix. */
+  private async warnAboutCommittedSecrets(rootDir: string, names: string): Promise<void> {
+    const committed = (await this.git.trackedFiles(rootDir)).filter(looksLikeSecret);
+    if (committed.length === 0) return;
+    const list = committed.join(', ');
+    this.logger.warn(
+      `${list} ${committed.length === 1 ? 'is' : 'are'} committed to git, so ${names} and anyone with access to the repository can read ${committed.length === 1 ? 'it' : 'them'}. ` +
+        `To stop tracking: git rm --cached ${committed.join(' ')} — then rotate those secrets, because they stay in the git history.`,
+    );
   }
 
   /** Which changed files to commit before pushing. [] means push existing commits only (or nothing). */

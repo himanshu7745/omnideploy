@@ -14,7 +14,7 @@ import {
   type ProviderContext,
   type ProviderOptions,
 } from '../../domain/index.js';
-import { DEFAULT_POLL, poll, redact, type PollOptions } from './support.js';
+import { DEFAULT_POLL, filesToUpload, poll, redact, type PollOptions } from './support.js';
 
 const API = 'https://api.github.com';
 
@@ -69,6 +69,9 @@ export class GitHubPagesProvider implements DeploymentProvider {
     const tmp = await this.fs.makeTempDir('omnideploy-pages');
     try {
       await this.fs.copyDir(ctx.sourceDir, tmp);
+      // GitHub Pages serves every published file publicly: drop secret files from the copy.
+      const keep = new Set(await filesToUpload(this.fs, tmp, ctx.logger));
+      for (const f of await this.fs.collectFiles(tmp)) if (!keep.has(f)) await this.fs.remove(this.fs.join(tmp, f));
       await this.fs.writeText(this.fs.join(tmp, '.nojekyll'), '');
       if (cname) await this.fs.writeText(this.fs.join(tmp, 'CNAME'), cname + '\n');
       if (isSinglePageApp(ctx.profile)) {

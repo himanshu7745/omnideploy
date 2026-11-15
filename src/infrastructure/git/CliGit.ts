@@ -44,6 +44,11 @@ export class CliGit implements GitPort {
     return r.exitCode === 0 ? r.stdout.trim() : null;
   }
 
+  async trackedFiles(dir: string): Promise<string[]> {
+    const r = await this.proc.run('git', ['ls-files', '-z'], { cwd: dir });
+    return r.exitCode === 0 ? r.stdout.split('\0').filter(Boolean) : [];
+  }
+
   async headCommit(dir: string): Promise<string | null> {
     const r = await this.proc.run('git', ['rev-parse', 'HEAD'], { cwd: dir });
     return r.exitCode === 0 ? r.stdout.trim() : null;
@@ -62,8 +67,10 @@ export class CliGit implements GitPort {
     await this.git(dir, [...(await this.identityArgs(dir)), 'commit', '-m', message, '--', ...paths], 'commit');
   }
 
-  async commitAll(dir: string, message: string): Promise<void> {
+  async commitAll(dir: string, message: string, exclude: string[] = []): Promise<void> {
     await this.git(dir, ['add', '-A'], 'add');
+    // `rm --cached` unstages without touching the files, and also works before the first commit.
+    if (exclude.length > 0) await this.git(dir, ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...exclude], 'rm --cached');
     await this.git(dir, [...(await this.identityArgs(dir)), 'commit', '-q', '-m', message], 'commit');
   }
 

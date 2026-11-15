@@ -69,14 +69,17 @@ export class FakePrompt implements PromptPort {
   confirms: string[] = [];
   constructor(
     readonly interactive = false,
-    private readonly answers: { confirm?: boolean; select?: string; multiselect?: string[]; password?: string; text?: string | string[] } = {},
+    private readonly answers: { confirm?: boolean; select?: string | string[]; multiselect?: string[]; password?: string; text?: string | string[] } = {},
   ) {}
   async confirm(message: string) {
     this.confirms.push(message);
     return this.answers.confirm ?? true;
   }
-  async select<T extends string>(_m: string, choices: Choice<T>[]) {
-    return (this.answers.select as T) ?? choices[0]!.value;
+  selects: string[] = [];
+  async select<T extends string>(message: string, choices: Choice<T>[]) {
+    this.selects.push(message);
+    const a = this.answers.select;
+    return ((Array.isArray(a) ? a.shift() : a) as T | undefined) ?? choices[0]!.value;
   }
   async multiselect<T extends string>(_m: string, choices: Choice<T>[]) {
     return (this.answers.multiselect as T[]) ?? choices.map((c) => c.value);
@@ -166,9 +169,13 @@ export class FakeGit implements GitPort {
   async hasCommits() {
     return this.committed;
   }
-  async commitAll(_d: string, message: string) {
-    this.commits.push({ paths: [...this.dirty], message });
-    this.dirty = [];
+  tracked: string[] = [];
+  async trackedFiles() {
+    return this.tracked;
+  }
+  async commitAll(_d: string, message: string, exclude: string[] = []) {
+    this.commits.push({ paths: this.dirty.filter((d) => !exclude.includes(d)), message });
+    this.dirty = this.dirty.filter((d) => exclude.includes(d));
     this.committed = true;
   }
   async addRemote(_d: string, _name: string, url: string) {
@@ -238,8 +245,8 @@ export class FakeProcess implements ProcessRunnerPort {
     this.calls.push({ bin, args, env: opts.env });
     return { exitCode: 0, stdout: '', stderr: '', ...this.handler(bin, args) };
   }
-  async shell(command: string) {
-    return this.run('sh', ['-c', command]);
+  async shell(command: string, opts: { env?: Record<string, string | undefined> } = {}) {
+    return this.run('sh', ['-c', command], opts);
   }
   async has(bin: string) {
     return this.installed.includes(bin);

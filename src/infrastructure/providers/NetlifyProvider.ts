@@ -11,7 +11,7 @@ import {
   type ProviderCapabilities,
   type ProviderContext,
 } from '../../domain/index.js';
-import { DEFAULT_POLL, poll, textFile, zip, type PollOptions } from './support.js';
+import { DEFAULT_POLL, filesToUpload, poll, textFile, zip, type PollOptions } from './support.js';
 
 const API = 'https://api.netlify.com/api/v1';
 
@@ -71,7 +71,7 @@ export class NetlifyProvider implements DeploymentProvider {
     const site = await this.ensureSite(ctx);
 
     ctx.progress('packaging files');
-    const paths = await this.fs.collectFiles(ctx.sourceDir);
+    const paths = await filesToUpload(this.fs, ctx.sourceDir, ctx.logger);
     const files = await Promise.all(paths.map(async (p) => ({ path: p, data: await this.fs.readBytes(this.fs.join(ctx.sourceDir, p)) })));
     // Zip deploys ignore netlify.toml, so SPA redirects must ship as _redirects.
     if (isSinglePageApp(ctx.profile) && !paths.includes('_redirects')) files.push(textFile('_redirects', '/*  /index.html  200\n'));

@@ -12,6 +12,7 @@ const schema = z.object({
       healthCheckPath: z.string().startsWith('/').optional(),
     })
     .optional(),
+  env: z.object({ optional: z.array(z.string()).optional(), sync: z.boolean().optional() }).optional(),
   providers: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
 });
 
@@ -42,8 +43,8 @@ export class JsonConfigRepository implements ConfigRepositoryPort {
 
   async save(rootDir: string, config: ProjectConfig): Promise<void> {
     // Stable, human-friendly key order: identity, build, runtime, then provider state.
-    const { name, build, app, providers, ...rest } = config;
-    const ordered = { $schema: SCHEMA_URL, name, build, app, ...rest, providers };
+    const { name, build, app, env, providers, ...rest } = config;
+    const ordered = { $schema: SCHEMA_URL, name, build, app, env, ...rest, providers };
     await this.fs.writeText(this.fs.join(rootDir, this.fileName), JSON.stringify(stripUndefined(ordered), null, 2) + '\n');
   }
 }

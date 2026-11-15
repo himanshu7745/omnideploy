@@ -19,12 +19,13 @@ export class BuildProject {
     private readonly logger: LoggerPort,
   ) {}
 
-  async execute(profile: ProjectProfile, opts: { skipBuild?: boolean; spinner?: Spinner }): Promise<string> {
+  /** `env`: production variables (from .env.production) available to the build, e.g. VITE_API_URL. */
+  async execute(profile: ProjectProfile, opts: { skipBuild?: boolean; spinner?: Spinner; env?: Record<string, string> }): Promise<string> {
     if (profile.kind !== 'static') return profile.rootDir;
 
     if (profile.buildCommand && !opts.skipBuild) {
       opts.spinner?.start(`Building: ${profile.buildCommand}`);
-      const res = await this.process.shell(profile.buildCommand, { cwd: profile.rootDir, env: { CI: '1' } });
+      const res = await this.process.shell(profile.buildCommand, { cwd: profile.rootDir, env: { CI: '1', ...opts.env } });
       if (res.exitCode !== 0) {
         opts.spinner?.stop('Build failed', false);
         const tail = (res.stderr || res.stdout).trim().split('\n').slice(-15).join('\n');

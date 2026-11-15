@@ -7,7 +7,7 @@ import {
   type ProcessRunnerPort,
   type ProviderCapabilities,
 } from '../../domain/index.js';
-import { redact } from './support.js';
+import { redact, redactAll } from './support.js';
 
 const INSTALL = 'npm i -g @railway/cli   (or: brew install railway)';
 
@@ -45,6 +45,8 @@ export class RailwayProvider implements DeploymentProvider {
       ...(ctx.options.environment ? ['--environment', String(ctx.options.environment)] : []),
     ];
 
+    if (Object.keys(ctx.env).length > 0) await this.setVariables(ctx, env, scope);
+
     ctx.progress('uploading and building (this can take a few minutes)');
     const up = await this.proc.run('railway', ['up', '--ci', ...scope], { cwd: ctx.profile.rootDir, env });
     const output = redact(`${up.stdout}\n${up.stderr}`, ctx.token);
@@ -66,6 +68,25 @@ export class RailwayProvider implements DeploymentProvider {
       state: 'ready',
       dashboardUrl: logsUrl,
     };
+  }
+
+  /** Sets the service's variables from .env.production before `railway up`, without triggering an extra deploy. */
+  private async setVariables(ctx: DeployContext, env: Record<string, string>, scope: string[]): Promise<void> {
+    ctx.progress('setting environment variables');
+    const pairs = Object.entries(ctx.env).map(([k, v]) => `${k}=${v}`);
+    const run = (args: string[]) => this.proc.run('railway', args, { cwd: ctx.profile.rootDir, env });
+    let r = await run(['variable', 'set', ...pairs, '--skip-deploys', ...scope]);
+    let output = `${r.stdout}\n${r.stderr}`;
+    // Older CLIs only know `railway variables --set KEY=VALUE`.
+    if (r.exitCode !== 0 && /unrecognized|unexpected argument|invalid subcommand|unknown command|wasn't expected|found argument/i.test(output)) {
+      r = await run(['variables', ...pairs.flatMap((p) => ['--set', p]), '--skip-deploys', ...scope]);
+      output = `${r.stdout}\n${r.stderr}`;
+    }
+    if (r.exitCode !== 0) {
+      const safe = redactAll(output, [ctx.token, ...Object.values(ctx.env)]).trim().split('\n').slice(-6).join('\n');
+      throw new DeploymentFailedError('Railway', `could not set environment variables: ${safe}`, railwayHint(output) ?? 'Set them in the Railway dashboard (service → Variables), then deploy again.');
+    }
+    ctx.logger.info(`Railway: set ${pairs.length} environment variable(s) from .env.production (${Object.keys(ctx.env).join(', ')}).`);
   }
 }
 

@@ -14,7 +14,9 @@ export interface GitPort {
   dirtyPaths(dir: string, paths?: string[]): Promise<string[]>;
   commit(dir: string, paths: string[], message: string): Promise<void>;
   /** Stages everything not ignored and commits it. */
-  commitAll(dir: string, message: string): Promise<void>;
+  commitAll(dir: string, message: string, exclude?: string[]): Promise<void>;
+  /** Paths (relative) git tracks in the current commit/index. */
+  trackedFiles(dir: string): Promise<string[]>;
   /** `auth.token` authenticates this push over HTTPS without touching the user's git config. */
   push(dir: string, remote?: string, branch?: string, auth?: { token: string }): Promise<void>;
   init(dir: string, branch: string): Promise<void>;

@@ -1,6 +1,5 @@
 import {
   DomainError,
-  looksLikeSecret,
   type FileSystemPort,
   type GitPort,
   type LoggerPort,
@@ -8,6 +7,7 @@ import {
   type RepositoryHostPort,
 } from '../../domain/index.js';
 import type { CredentialResolver } from './CredentialResolver.js';
+import type { SecretGuard } from './SecretGuard.js';
 
 export interface BootstrappedRemote {
   webUrl: string;
@@ -20,6 +20,10 @@ const DEFAULT_GITIGNORE = `node_modules/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+application-local.*
+.streamlit/secrets.toml
 .venv/
 venv/
 __pycache__/
@@ -43,6 +47,7 @@ export class RepositoryBootstrapper {
     private readonly credentials: CredentialResolver,
     private readonly prompt: PromptPort,
     private readonly logger: LoggerPort,
+    private readonly secrets: SecretGuard,
   ) {}
 
   /** Returns null if the project already has a remote. */
@@ -83,15 +88,9 @@ export class RepositoryBootstrapper {
       await this.git.init(rootDir, 'main');
     }
     if (!(await this.git.hasCommits(rootDir))) {
-      const secrets = (await this.git.dirtyPaths(rootDir)).filter(looksLikeSecret);
-      if (secrets.length > 0) {
-        throw new DomainError(
-          `Refusing to commit files that look like secrets: ${secrets.join(', ')}.`,
-          'Add them to .gitignore, then deploy again.',
-          'SECRETS_IN_COMMIT',
-        );
-      }
-      await this.git.commitAll(rootDir, 'Initial commit (omnideploy)');
+      // Secret files go to .gitignore; files with hard-coded secrets are left out unless the user says otherwise.
+      const { exclude } = await this.secrets.review(rootDir, await this.git.dirtyPaths(rootDir), { yes: opts.yes });
+      await this.git.commitAll(rootDir, 'Initial commit (omnideploy)', exclude);
     }
     const branch = (await this.git.currentBranch(rootDir)) ?? 'main';
 

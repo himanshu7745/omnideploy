@@ -4,6 +4,8 @@ import {
   type GitPort,
   type ProjectProfile,
 } from '../../domain/index.js';
+import type { ProductionEnvironment } from '../services/ProductionEnvironment.js';
+import { ENV_FILE } from '../services/ProductionEnvironment.js';
 import type { DetectProject } from './DetectProject.js';
 import type { ListProviders } from './ListProviders.js';
 
@@ -19,6 +21,7 @@ export class DoctorCheck {
     private readonly detect: DetectProject,
     private readonly listProviders: ListProviders,
     private readonly git: GitPort,
+    private readonly productionEnv: ProductionEnvironment,
   ) {}
 
   async execute(rootDir: string, runtime: { nodeVersion: string }): Promise<Check[]> {
@@ -41,6 +44,14 @@ export class DoctorCheck {
         r.config
           ? { name: 'Config', status: 'ok', detail: `omnideploy.json (${configured.join(', ') || 'no providers'})` }
           : { name: 'Config', status: 'warn', detail: 'no omnideploy.json', fix: 'Run `omnideploy init`.' },
+      );
+      const env = await this.productionEnv.inspect(rootDir, r.config);
+      const count = Object.keys(env.parsed).length;
+      checks.push(
+        !env.enabled ? { name: 'Environment', status: 'ok', detail: 'env.sync is off — variables are managed in the provider dashboards' }
+        : env.problem ? { name: 'Environment', status: 'fail', detail: env.problem, fix: `Add the missing values to ${ENV_FILE} (KEY=value per line), or list optional ones under env.optional in omnideploy.json.` }
+        : env.text === null ? { name: 'Environment', status: 'ok', detail: `no ${ENV_FILE}, and the app doesn't seem to need one` }
+        : { name: 'Environment', status: 'ok', detail: `${ENV_FILE}: ${count} variable(s) — set on the provider on every deploy` },
       );
     } catch (e) {
       checks.push({

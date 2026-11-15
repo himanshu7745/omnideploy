@@ -13,6 +13,11 @@ export interface DeployContext {
   sourceDir: string;
   production: boolean;
   serviceName: string;
+  /**
+   * Production environment variables from .env.production (PORT removed). Providers that build or run the app
+   * remotely set them on the platform before building; add or update only, never delete.
+   */
+  env: Record<string, string>;
   /** Commit omnideploy pushed in this run (git-based providers may already be auto-deploying it). */
   pushedCommit?: string;
   logger: LoggerPort;

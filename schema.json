@@ -46,6 +46,25 @@
       },
       "additionalProperties": false
     },
+    "env": {
+      "type": "object",
+      "description": "Production environment variables. Values always come from .env.production (never from this file).",
+      "properties": {
+        "optional": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Variables the app can run without; they may be missing or empty in .env.production."
+        },
+        "sync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set to false to stop checking .env.production and setting variables on providers."
+        }
+      },
+      "additionalProperties": false
+    },
     "providers": {
       "type": "object",
       "description": "Per-provider options. IDs created on first deploy are saved here automatically.",

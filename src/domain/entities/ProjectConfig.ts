@@ -6,6 +6,13 @@ export interface ProjectConfig {
   name?: string;
   build?: { command?: string; output?: string };
   app?: { start?: string; port?: number; healthCheckPath?: string };
+  /** Production environment variables come from .env.production. */
+  env?: {
+    /** Variables the app can run without, so they may be missing or empty. */
+    optional?: string[];
+    /** false = don't check or send .env.production at all (manage variables in the dashboards). */
+    sync?: boolean;
+  };
   providers: Record<string, ProviderOptions>;
 }
 

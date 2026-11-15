@@ -10,6 +10,8 @@ import {
   LogoutProvider,
   ProviderRegistry,
   RepositoryBootstrapper,
+  SecretGuard,
+  ProductionEnvironment,
 } from '../../src/application/index.js';
 import {
   DomainError,
@@ -103,6 +105,7 @@ function setup(opts: {
   const credentials = new CredentialResolver(new MemoryCredentials(opts.tokens ?? { netlify: 't-n', render: 't-r', railway: 't-rw' }), prompt);
   const repoHost = opts.repoHost ?? new FakeRepoHost('gh-cli-token');
   const browser = new FakeBrowser();
+  const secrets = new SecretGuard(fs, prompt, logger);
   const deploy = new DeployProject(
     detect,
     registry,
@@ -111,10 +114,12 @@ function setup(opts: {
     credentials,
     configRepo,
     git,
-    new RepositoryBootstrapper(git, repoHost, fs, credentials, prompt, logger),
+    new RepositoryBootstrapper(git, repoHost, fs, credentials, prompt, logger, secrets),
     prompt,
     logger,
     browser,
+    secrets,
+    new ProductionEnvironment(fs, prompt, logger, secrets),
   );
   const init = new InitProject(detect, registry, generate, configRepo, prompt, logger);
   return { fs, logger, prompt, configRepo, git, repoHost, browser, proc, staticHost, gitHost, containerHost, deploy, init, generate };
@@ -244,12 +249,23 @@ describe('DeployProject', () => {
     expect(err.hint).toMatch(/--yes/);
   });
 
-  it('refuses to auto-commit files that look like secrets, before creating anything remotely', async () => {
-    const git = new FakeGit(null, ['app.py', '.env', '.env.example']);
+  it('never puts secret files in the initial commit of a new repo', async () => {
+    const git = new FakeGit(null, ['app.py', '.env', '.env.example', 'certs/server.key']);
     const s = setup({ profile: JAVA, git });
-    await expect(s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true })).rejects.toThrow(/secrets: \.env\./);
-    expect(s.repoHost.created).toHaveLength(0);
-    expect(git.commits).toHaveLength(0);
+    await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true });
+    expect(git.commits[0]).toEqual({ paths: ['app.py', '.env.example'], message: 'Initial commit (omnideploy)' });
+    expect(s.fs.files.get(`${ROOT}/.gitignore`)).toMatch(/^\.env$/m);
+    expect(s.fs.files.get(`${ROOT}/.gitignore`)).toContain('certs/server.key');
+  });
+
+  it('leaves files with hard-coded secrets out of the initial commit (--yes)', async () => {
+    const git = new FakeGit(null, ['pom.xml', 'src/main/resources/application.yml']);
+    const s = setup({ profile: JAVA, git });
+    s.fs.files.set(`${ROOT}/src/main/resources/application.yml`, 'spring:\n  datasource:\n    password: S3cretPass!\n');
+    s.fs.files.set(`${ROOT}/pom.xml`, '<project/>');
+    await s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, yes: true });
+    expect(git.commits[0]!.paths).toEqual(['pom.xml']);
+    expect(s.prompt.notes.find((n) => n.title === 'Possible hard-coded secrets')?.body).toContain('line 3: password (S3•••s!)');
   });
 
   it('dry run plans without writing, building or deploying', async () => {
@@ -403,12 +419,59 @@ describe('DeployProject git sync (redeploys)', () => {
     expect(s.prompt.confirms).toEqual([]);
   });
 
-  it('--yes commits everything except files that look like secrets', async () => {
+  it('--yes commits everything except secret files, which go to .gitignore', async () => {
     const git = new FakeGit(undefined, ['src/App.java', '.env', 'config/server.key', '.env.example']);
     const s = withFiles(git, new FakePrompt(false));
     await run(s, true);
-    expect(git.commits[0]!.paths).toEqual(['src/App.java', '.env.example']);
-    expect(s.logger.lines).toContain('warn: Not committing files that look like secrets: .env, config/server.key (add them to .gitignore).');
+    expect(git.commits[0]!.paths).toEqual(['src/App.java', '.env.example', '.gitignore']);
+    expect(s.fs.files.get(`${ROOT}/.gitignore`)).toBe('# Secrets (added by omnideploy)\n.env\nconfig/server.key\n');
+    expect(s.logger.lines).toContain('info: Added .env, config/server.key to .gitignore — they stay on your machine only.');
+  });
+
+  it('interactive: asks before touching .gitignore, and still never commits the secret file', async () => {
+    const git = new FakeGit(undefined, ['src/App.java', '.env']);
+    const s = withFiles(git, new FakePrompt(true, { select: 'all', confirm: false }));
+    s.fs.files.set(`${ROOT}/.gitignore`, 'target/\n');
+    await run(s);
+    expect(s.prompt.confirms.some((c) => c.startsWith('.env looks like secrets'))).toBe(true);
+    expect(git.commits[0]!.paths).toEqual(['src/App.java']);
+    expect(s.fs.files.get(`${ROOT}/.gitignore`)).toBe('target/\n');
+  });
+
+  it('hard-coded secret in application.yml: the user can leave the file out', async () => {
+    const git = new FakeGit(undefined, ['src/App.java', 'src/main/resources/application.yml']);
+    const s = withFiles(git, new FakePrompt(true, { select: ['all', 'exclude'] }));
+    s.fs.files.set(`${ROOT}/src/main/resources/application.yml`, 'jwt:\n  secret: c2VjcmV0LWtleS0xMjM0\n');
+    await run(s);
+    expect(s.prompt.selects[1]).toMatch(/look like secrets/);
+    expect(git.commits[0]!.paths).toEqual(['src/App.java']);
+    expect(s.logger.lines.some((l) => l.includes('Left out src/main/resources/application.yml'))).toBe(true);
+  });
+
+  it('hard-coded secret in application.yml: the user can commit it anyway', async () => {
+    const git = new FakeGit(undefined, ['src/main/resources/application.yml']);
+    const s = withFiles(git, new FakePrompt(true, { select: ['all', 'commit'] }));
+    s.fs.files.set(`${ROOT}/src/main/resources/application.yml`, 'password: hunter22\n');
+    await run(s);
+    expect(git.commits[0]!.paths).toEqual(['src/main/resources/application.yml']);
+  });
+
+  it('config that reads secrets from the environment is committed without questions', async () => {
+    const git = new FakeGit(undefined, ['src/main/resources/application.yml']);
+    const s = withFiles(git, new FakePrompt(true, { select: 'all' }));
+    s.fs.files.set(`${ROOT}/src/main/resources/application.yml`, 'spring:\n  datasource:\n    password: ${DB_PASSWORD}\n');
+    s.fs.files.set(`${ROOT}/.env.production`, 'DB_PASSWORD=from-the-env-file\n');
+    await run(s);
+    expect(s.prompt.selects).toHaveLength(1);
+    expect(git.commits[0]!.paths).toEqual(['src/main/resources/application.yml']);
+  });
+
+  it('warns when a secret file is already committed', async () => {
+    const git = new FakeGit(undefined, []);
+    git.tracked = ['pom.xml', '.env'];
+    const s = withFiles(git, new FakePrompt(true));
+    await run(s);
+    expect(s.logger.lines.some((l) => l.startsWith('warn: .env is committed to git') && l.includes('git rm --cached .env'))).toBe(true);
   });
 
   it('explains a rejected push', async () => {
@@ -423,6 +486,112 @@ describe('DeployProject git sync (redeploys)', () => {
     const err = await run(withFiles(new FakeGit(undefined, ['src/App.java']), new FakePrompt(false))).catch((e) => e);
     expect(err.code).toBe('GIT_SYNC_REQUIRED');
     expect(err.hint).toMatch(/--yes/);
+  });
+});
+
+describe('.env.production (single source of truth for production variables)', () => {
+  const RENDER = { ...JAVA, hasDockerfile: true };
+  const ready = (opts: { prompt?: FakePrompt; config?: MemoryConfigRepo; profile?: Partial<ProjectProfile> } = {}) => {
+    const s = setup({ profile: opts.profile ?? RENDER, prompt: opts.prompt, config: opts.config });
+    s.fs.files.set(`${ROOT}/Dockerfile`, 'FROM x');
+    s.fs.files.set(`${ROOT}/render.yaml`, 'services: []');
+    return s;
+  };
+  const deployRender = (s: ReturnType<typeof setup>, extra: { yes?: boolean; dryRun?: boolean } = { yes: true }) =>
+    s.deploy.execute({ rootDir: ROOT, providerIds: ['render'], production: true, ...extra });
+
+  it('no .env.production and nothing expected: deploys with no variables', async () => {
+    const s = ready();
+    await deployRender(s);
+    expect(s.gitHost.deployed[0]!.env).toEqual({});
+  });
+
+  it('passes every variable to the provider, except PORT (the platform sets it)', async () => {
+    const s = ready();
+    s.fs.files.set(`${ROOT}/.env.production`, 'DATABASE_URL=postgres://u:p@db.example.com/app\nJWT_SECRET="s3cr3t value"\nPORT=3000\n');
+    await deployRender(s);
+    expect(s.gitHost.deployed[0]!.env).toEqual({ DATABASE_URL: 'postgres://u:p@db.example.com/app', JWT_SECRET: 's3cr3t value' });
+    expect(s.logger.lines).toContain('info: Ignoring PORT from .env.production: the platform sets it.');
+    expect(s.logger.lines.join('\n')).not.toContain('s3cr3t');
+  });
+
+  it('passes the variables to local static builds', async () => {
+    const s = setup({ profile: VITE });
+    s.fs.files.set(`${ROOT}/.env.production`, 'VITE_API_URL=https://api.example.com\n');
+    await s.deploy.execute({ rootDir: ROOT, providerIds: ['netlify'], production: true, yes: true });
+    expect(s.proc.calls[0]!.env).toMatchObject({ CI: '1', VITE_API_URL: 'https://api.example.com' });
+  });
+
+  it('missing file but the app expects variables: stops before doing anything (non-interactive)', async () => {
+    const s = ready();
+    s.fs.files.set(`${ROOT}/.env.example`, 'DATABASE_URL=\nJWT_SECRET=changeme\nPORT=8080\n');
+    s.fs.files.delete(`${ROOT}/Dockerfile`);
+    const err = await deployRender(s).catch((e) => e);
+    expect(err.code).toBe('ENV_INCOMPLETE');
+    expect(err.message).toBe(
+      'The app needs production environment variables, but there is no .env.production for DATABASE_URL, JWT_SECRET (the app expects them, see .env.example).',
+    );
+    expect(err.hint).toMatch(/Put the production values in \.env\.production/);
+    expect(s.fs.files.has(`${ROOT}/Dockerfile`)).toBe(false); // nothing generated
+    expect(s.gitHost.deployed).toHaveLength(0);
+  });
+
+  it('interactive: offers to create .env.production with the expected names, then stops so you can fill it in', async () => {
+    const prompt = new FakePrompt(true, { confirm: true });
+    const s = ready({ prompt });
+    s.fs.files.set(`${ROOT}/.env.example`, 'DATABASE_URL=\nJWT_SECRET=\n');
+    const err = await deployRender(s, {}).catch((e) => e);
+    expect(prompt.confirms).toContain('Create .env.production with DATABASE_URL, JWT_SECRET for you to fill in?');
+    expect(err.message).toBe('Created .env.production — fill in DATABASE_URL, JWT_SECRET, then deploy again.');
+    expect(s.fs.files.get(`${ROOT}/.env.production`)).toMatch(/^# Production environment variables[\s\S]*\nDATABASE_URL=\nJWT_SECRET=\n$/);
+    expect(s.fs.files.get(`${ROOT}/.gitignore`)).toContain('.env.production');
+    expect(s.gitHost.deployed).toHaveLength(0);
+  });
+
+  it('Spring: ${VAR} placeholders without a default are required; with a default they are not', async () => {
+    const s = ready();
+    s.fs.files.set(`${ROOT}/src/main/resources/application.yml`, 'spring:\n  datasource:\n    password: ${DB_PASSWORD}\n    username: ${DB_USER:app}\n');
+    s.fs.files.set(`${ROOT}/.env.production`, 'OTHER=1\n');
+    const err = await deployRender(s).catch((e) => e);
+    expect(err.message).toContain('.env.production is missing DB_PASSWORD (the app expects it, see src/main/resources/application.yml)');
+  });
+
+  it('empty values count as missing', async () => {
+    const s = ready();
+    s.fs.files.set(`${ROOT}/.env.production`, 'DATABASE_URL=postgres://u:p@db.example.com/app\nJWT_SECRET=\n');
+    const err = await deployRender(s).catch((e) => e);
+    expect(err.message).toBe('The app needs production environment variables, but JWT_SECRET is empty in .env.production.');
+  });
+
+  it('env.optional allows a variable to be missing or empty', async () => {
+    const s = ready({ config: new MemoryConfigRepo({ env: { optional: ['SENTRY_DSN', 'JWT_SECRET'] }, providers: {} }) });
+    s.fs.files.set(`${ROOT}/.env.example`, 'DATABASE_URL=\nSENTRY_DSN=\n');
+    s.fs.files.set(`${ROOT}/.env.production`, 'DATABASE_URL=postgres://db.example.com/app\nJWT_SECRET=\n');
+    await deployRender(s);
+    expect(s.gitHost.deployed[0]!.env).toEqual({ DATABASE_URL: 'postgres://db.example.com/app' });
+  });
+
+  it('env.sync = false turns the whole feature off', async () => {
+    const s = ready({ config: new MemoryConfigRepo({ env: { sync: false }, providers: {} }) });
+    s.fs.files.set(`${ROOT}/.env.example`, 'DATABASE_URL=\n');
+    s.fs.files.set(`${ROOT}/.env.production`, 'A=1\n');
+    await deployRender(s);
+    expect(s.gitHost.deployed[0]!.env).toEqual({});
+  });
+
+  it('warns about values that point to localhost', async () => {
+    const s = ready();
+    s.fs.files.set(`${ROOT}/.env.production`, 'DATABASE_URL=postgres://u:p@localhost:5432/app\n');
+    await deployRender(s);
+    expect(s.logger.lines.some((l) => l.startsWith('warn: DATABASE_URL in .env.production points to localhost'))).toBe(true);
+  });
+
+  it('dry run reports a missing file as a warning instead of failing', async () => {
+    const s = ready();
+    s.fs.files.set(`${ROOT}/.env.example`, 'DATABASE_URL=\n');
+    const report = await deployRender(s, { dryRun: true });
+    expect(report.dryRun).toBe(true);
+    expect(s.logger.lines.some((l) => l.startsWith('warn: The app needs production environment variables'))).toBe(true);
   });
 });
 

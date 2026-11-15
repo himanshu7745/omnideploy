@@ -32,6 +32,7 @@ function ctx(over: Partial<DeployContext> = {}): DeployContext & { progressLog: 
     sourceDir: `${ROOT}/dist`,
     production: true,
     serviceName: 'demo',
+    env: {},
     logger: new MemoryLogger(),
     progress: (m) => progressLog.push(m),
     progressLog,
@@ -626,5 +627,252 @@ describe('GitHub Pages edge cases', () => {
     const err = await new GitHubPagesProvider(httpClient, siteFs(), new FakeGit(), FAST).deploy(ctx()).catch((e) => e);
     expect(err.code).toBe('PAGES_UNAVAILABLE');
     expect(err.hint).toMatch(/paid plan/);
+  });
+});
+
+describe('static uploads never include secret files', () => {
+  const leakyFs = () =>
+    new MemoryFs(
+      new Map([
+        [`${ROOT}/dist/index.html`, '<h1>hi</h1>'],
+        [`${ROOT}/dist/.env`, 'API_KEY=secret'],
+        [`${ROOT}/dist/deploy.pem`, '-----BEGIN PRIVATE KEY-----'],
+        [`${ROOT}/dist/.env.example`, 'API_KEY='],
+      ]),
+    );
+
+  it('Vercel', async () => {
+    let manifest: string[] = [];
+    server.use(
+      http.post('https://api.vercel.com/v13/deployments', async ({ request }) => {
+        manifest = ((await request.json()) as { files: Array<{ file: string }> }).files.map((f) => f.file);
+        return HttpResponse.json({ id: 'dpl_1', url: 'demo.vercel.app', readyState: 'READY' });
+      }),
+      http.get('https://api.vercel.com/v13/deployments/dpl_1', () => HttpResponse.json({ id: 'dpl_1', url: 'demo.vercel.app', readyState: 'READY' })),
+    );
+    const c = ctx();
+    await new VercelProvider(httpClient, leakyFs(), FAST).deploy(c);
+    expect(manifest.sort()).toEqual(['.env.example', 'index.html']);
+    expect((c.logger as MemoryLogger).lines).toContain(
+      'warn: Not uploading .env, deploy.pem: they look like secrets, and anything on a static host can be downloaded by anyone.',
+    );
+  });
+
+  it('Netlify', async () => {
+    let zipBytes = new Uint8Array();
+    server.use(
+      http.post('https://api.netlify.com/api/v1/sites', () => HttpResponse.json({ id: 's1', name: 'demo', url: 'http://demo.netlify.app' })),
+      http.post('https://api.netlify.com/api/v1/sites/s1/deploys', async ({ request }) => {
+        zipBytes = new Uint8Array(await request.arrayBuffer());
+        return HttpResponse.json({ id: 'd1', state: 'uploaded' });
+      }),
+      http.get('https://api.netlify.com/api/v1/deploys/d1', () => HttpResponse.json({ id: 'd1', state: 'ready' })),
+    );
+    await new NetlifyProvider(httpClient, leakyFs(), FAST).deploy(ctx());
+    const names = new TextDecoder('latin1').decode(zipBytes);
+    expect(names).toContain('index.html');
+    expect(names).toContain('.env.example');
+    expect(names).not.toMatch(/\.env(?!\.example)/);
+    expect(names).not.toContain('deploy.pem');
+  });
+
+  it('GitHub Pages', async () => {
+    const fs = leakyFs();
+    const git = new FakeGit();
+    let published: string[] = [];
+    git.publishDirectory = async (dir) => {
+      published = (await fs.collectFiles(dir)).sort();
+    };
+    server.use(
+      http.get('https://api.github.com/repos/acme/app/pages', () => HttpResponse.json({ html_url: 'https://acme.github.io/app/', source: { branch: 'gh-pages', path: '/' } })),
+      http.get('https://api.github.com/repos/acme/app/pages/builds/latest', () => HttpResponse.json({ status: 'built', commit: 'c1' })),
+    );
+    await new GitHubPagesProvider(httpClient, fs, git, FAST).deploy(ctx());
+    expect(published).toEqual(['.env.example', '.nojekyll', '404.html', 'index.html']);
+    expect(fs.files.get(`${ROOT}/dist/.env`)).toBe('API_KEY=secret'); // the original is untouched
+  });
+});
+
+describe('environment variables from .env.production', () => {
+  const finished = (id: string, dep: string) => [
+    http.get(`https://api.render.com/v1/services/${id}/deploys/${dep}`, () => HttpResponse.json({ id: dep, status: 'live' })),
+    http.get(`https://api.render.com/v1/services/${id}`, () => HttpResponse.json({ id, name: 'demo', autoDeploy: 'yes', serviceDetails: { url: 'https://x.onrender.com' } })),
+  ];
+  const ENV = { DATABASE_URL: 'postgres://u:new@db.example.com/app', JWT_SECRET: 'jwt-123' };
+
+  it('Render, new service: variables are part of the create request, so the first build has them', async () => {
+    let body: Record<string, any> = {};
+    server.use(
+      http.get('https://api.render.com/v1/owners', () => HttpResponse.json([{ owner: { id: 'own-1', name: 'Me' } }])),
+      ...finished('srv-n', 'dep-1'),
+      http.post('https://api.render.com/v1/services', async ({ request }) => {
+        body = (await request.json()) as Record<string, any>;
+        return HttpResponse.json({ service: { id: 'srv-n', name: 'demo' }, deployId: 'dep-1' });
+      }),
+    );
+    await new RenderProvider(httpClient, new FakeGit(), FAST).deploy(ctx({ profile: serverProfile, sourceDir: ROOT, env: ENV }));
+    expect(body.envVars).toEqual([
+      { key: 'DATABASE_URL', value: ENV.DATABASE_URL },
+      { key: 'JWT_SECRET', value: 'jwt-123' },
+    ]);
+  });
+
+  it('Render, existing service: merges, keeping variables set in the dashboard (the API replaces the whole list)', async () => {
+    let put: unknown;
+    server.use(
+      ...finished('srv-1', 'dep-2'),
+      http.get('https://api.render.com/v1/services/srv-1/env-vars', () =>
+        HttpResponse.json([
+          { envVar: { key: 'SET_IN_DASHBOARD', value: 'keep-me' }, cursor: 'c1' },
+          { envVar: { key: 'DATABASE_URL', value: 'postgres://u:old@db.example.com/app' }, cursor: 'c2' },
+        ]),
+      ),
+      http.put('https://api.render.com/v1/services/srv-1/env-vars', async ({ request }) => {
+        put = await request.json();
+        return HttpResponse.json([]);
+      }),
+      http.post('https://api.render.com/v1/services/srv-1/deploys', () => HttpResponse.json({ id: 'dep-2', status: 'created' })),
+    );
+    const c = ctx({ profile: serverProfile, options: { serviceId: 'srv-1' }, env: ENV });
+    await new RenderProvider(httpClient, new FakeGit(), FAST).deploy(c);
+    expect(put).toEqual([
+      { key: 'SET_IN_DASHBOARD', value: 'keep-me' },
+      { key: 'DATABASE_URL', value: ENV.DATABASE_URL },
+      { key: 'JWT_SECRET', value: 'jwt-123' },
+    ]);
+    expect((c.logger as MemoryLogger).lines).toContain('info: Render: added JWT_SECRET; updated DATABASE_URL from .env.production.');
+    expect((c.logger as MemoryLogger).lines.join('\n')).not.toContain('jwt-123');
+  });
+
+  it('Render: reads every page of existing variables before replacing them', async () => {
+    let put: Array<{ key: string }> = [];
+    const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({ envVar: { key: `K${from + i}`, value: 'v' }, cursor: `c${from + i}` }));
+    server.use(
+      ...finished('srv-1', 'dep-2'),
+      http.get('https://api.render.com/v1/services/srv-1/env-vars', ({ request }) =>
+        HttpResponse.json(new URL(request.url).searchParams.get('cursor') === 'c99' ? page(100, 3) : page(0, 100)),
+      ),
+      http.put('https://api.render.com/v1/services/srv-1/env-vars', async ({ request }) => {
+        put = (await request.json()) as Array<{ key: string }>;
+        return HttpResponse.json([]);
+      }),
+      http.post('https://api.render.com/v1/services/srv-1/deploys', () => HttpResponse.json({ id: 'dep-2', status: 'created' })),
+    );
+    await new RenderProvider(httpClient, new FakeGit(), FAST).deploy(ctx({ profile: serverProfile, options: { serviceId: 'srv-1' }, env: { NEW: 'x' } }));
+    expect(put).toHaveLength(104);
+  });
+
+  it('Render: unchanged variables are not rewritten, and the push auto-deploy is followed', async () => {
+    let wrote = false;
+    let triggered = false;
+    server.use(
+      ...finished('srv-1', 'dep-auto'),
+      http.get('https://api.render.com/v1/services/srv-1/env-vars', () => HttpResponse.json([{ envVar: { key: 'JWT_SECRET', value: 'jwt-123' }, cursor: 'c' }])),
+      http.put('https://api.render.com/v1/services/srv-1/env-vars', () => {
+        wrote = true;
+        return HttpResponse.json([]);
+      }),
+      http.get('https://api.render.com/v1/services/srv-1/deploys', () => HttpResponse.json([{ deploy: { id: 'dep-auto', status: 'build_in_progress', commit: { id: 'f00d' } } }])),
+      http.post('https://api.render.com/v1/services/srv-1/deploys', () => {
+        triggered = true;
+        return HttpResponse.json({ id: 'x', status: 'created' });
+      }),
+    );
+    await new RenderProvider(httpClient, new FakeGit(), FAST).deploy(ctx({ profile: serverProfile, options: { serviceId: 'srv-1' }, env: { JWT_SECRET: 'jwt-123' }, pushedCommit: 'f00d' }));
+    expect(wrote).toBe(false);
+    expect(triggered).toBe(false);
+  });
+
+  it('Render: changed variables → a fresh build of the pushed commit, since the auto-deploy started with the old ones', async () => {
+    let body: unknown;
+    server.use(
+      ...finished('srv-1', 'dep-new'),
+      http.get('https://api.render.com/v1/services/srv-1/env-vars', () => HttpResponse.json([])),
+      http.put('https://api.render.com/v1/services/srv-1/env-vars', () => HttpResponse.json([])),
+      http.get('https://api.render.com/v1/services/srv-1/deploys', () => HttpResponse.json([{ deploy: { id: 'dep-auto', status: 'build_in_progress', commit: { id: 'f00d' } } }])),
+      http.post('https://api.render.com/v1/services/srv-1/deploys', async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json({ id: 'dep-new', status: 'created' });
+      }),
+    );
+    const d = await new RenderProvider(httpClient, new FakeGit(), FAST).deploy(ctx({ profile: serverProfile, options: { serviceId: 'srv-1' }, env: ENV, pushedCommit: 'f00d' }));
+    expect(body).toEqual({ clearCache: 'do_not_clear', commitId: 'f00d' });
+    expect(d.id).toBe('dep-new');
+  });
+
+  it('Railway: sets the variables before `railway up`, without an extra deploy', async () => {
+    const proc = new FakeProcess(() => ({ stdout: 'ok' }), ['railway']);
+    await new RailwayProvider(proc).deploy(ctx({ profile: serverProfile, options: { service: 'api' }, env: ENV }));
+    expect(proc.calls[0]).toMatchObject({
+      args: ['variable', 'set', `DATABASE_URL=${ENV.DATABASE_URL}`, 'JWT_SECRET=jwt-123', '--skip-deploys', '--service', 'api'],
+      env: { RAILWAY_TOKEN: 'tok' },
+    });
+    expect(proc.calls[1]!.args[0]).toBe('up');
+  });
+
+  it('Railway: falls back to the older CLI syntax', async () => {
+    const proc = new FakeProcess(
+      (_b, args) => (args[0] === 'variable' ? { exitCode: 2, stderr: "error: unrecognized subcommand 'set'" } : { stdout: 'ok' }),
+      ['railway'],
+    );
+    await new RailwayProvider(proc).deploy(ctx({ profile: serverProfile, env: { A: 'one' } }));
+    expect(proc.calls[1]!.args).toEqual(['variables', '--set', 'A=one', '--skip-deploys']);
+  });
+
+  it('Railway: a failure never shows the values', async () => {
+    const proc = new FakeProcess(() => ({ exitCode: 1, stderr: `failed to set DATABASE_URL=${ENV.DATABASE_URL} with tok` }), ['railway']);
+    const err = await new RailwayProvider(proc).deploy(ctx({ profile: serverProfile, env: ENV })).catch((e) => e);
+    expect(err.message).toContain('could not set environment variables');
+    expect(err.message).not.toContain('u:new');
+    expect(err.message).toContain('***');
+  });
+
+  const nextProfile: ProjectProfile = { rootDir: ROOT, language: 'node', framework: 'nuxt', kind: 'serverless', port: 3000, hasDockerfile: false };
+  const nextFs = () => new MemoryFs(new Map([[`${ROOT}/package.json`, '{}'], [`${ROOT}/pages/index.vue`, '<template/>']]));
+
+  it('Vercel (framework app): creates the project if needed, upserts the variables, then deploys into it', async () => {
+    const calls: string[] = [];
+    let envBody: unknown;
+    let deployBody: Record<string, any> = {};
+    server.use(
+      http.get('https://api.vercel.com/v9/projects/demo', () => (calls.push('get project'), HttpResponse.json({ error: { code: 'not_found' } }, { status: 404 }))),
+      http.post('https://api.vercel.com/v11/projects', () => (calls.push('create project'), HttpResponse.json({ id: 'prj_9' }))),
+      http.post('https://api.vercel.com/v10/projects/prj_9/env', async ({ request }) => {
+        calls.push(`env upsert=${new URL(request.url).searchParams.get('upsert')}`);
+        envBody = await request.json();
+        return HttpResponse.json({ created: [], failed: [] });
+      }),
+      http.post('https://api.vercel.com/v13/deployments', async ({ request }) => {
+        calls.push('deploy');
+        deployBody = (await request.json()) as Record<string, any>;
+        return HttpResponse.json({ id: 'dpl_1', url: 'demo.vercel.app', readyState: 'READY', projectId: 'prj_9' });
+      }),
+      http.get('https://api.vercel.com/v13/deployments/dpl_1', () => HttpResponse.json({ id: 'dpl_1', url: 'demo.vercel.app', readyState: 'READY', projectId: 'prj_9' })),
+    );
+    await new VercelProvider(httpClient, nextFs(), FAST).deploy(ctx({ profile: nextProfile, sourceDir: ROOT, env: ENV }));
+    expect(calls).toEqual(['get project', 'create project', 'env upsert=true', 'deploy']);
+    expect(envBody).toEqual([
+      { key: 'DATABASE_URL', value: ENV.DATABASE_URL, type: 'encrypted', target: ['production', 'preview'] },
+      { key: 'JWT_SECRET', value: 'jwt-123', type: 'encrypted', target: ['production', 'preview'] },
+    ]);
+    expect(deployBody).toMatchObject({ project: 'prj_9', projectSettings: { framework: 'nuxtjs' } });
+  });
+
+  it('Vercel: reports variables it could not set', async () => {
+    server.use(
+      http.post('https://api.vercel.com/v10/projects/prj_1/env', () => HttpResponse.json({ failed: [{ error: { key: 'BAD-NAME', message: 'invalid key' } }] })),
+    );
+    const err = await new VercelProvider(httpClient, nextFs(), FAST)
+      .deploy(ctx({ profile: nextProfile, sourceDir: ROOT, env: { 'BAD-NAME': 'x' }, options: { projectId: 'prj_1' } }))
+      .catch((e) => e);
+    expect(err.message).toBe('Vercel API error: could not set environment variables (BAD-NAME: invalid key)');
+  });
+
+  it('Vercel static sites: nothing is sent — the local build already used the values', async () => {
+    server.use(
+      http.post('https://api.vercel.com/v13/deployments', () => HttpResponse.json({ id: 'dpl_1', url: 'demo.vercel.app', readyState: 'READY' })),
+      http.get('https://api.vercel.com/v13/deployments/dpl_1', () => HttpResponse.json({ id: 'dpl_1', url: 'demo.vercel.app', readyState: 'READY' })),
+    );
+    await expect(new VercelProvider(httpClient, siteFs(), FAST).deploy(ctx({ env: ENV }))).resolves.toBeTruthy(); // msw fails on any other request
   });
 });

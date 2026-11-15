@@ -6,3 +6,4 @@ export * from './services/CompatibilityPolicy.js';
 export * from './services/naming.js';
 export * from './services/spa.js';
 export * from './services/secrets.js';
+export * from './services/dotenv.js';

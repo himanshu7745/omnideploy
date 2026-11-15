@@ -138,3 +138,21 @@ describe('CliGit.dirtyPaths', () => {
     }
   });
 });
+
+describe('CliGit.commitAll with exclusions (real git)', () => {
+  it('leaves excluded files out of the very first commit', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'omni-git-'));
+    const git = new CliGit(new ExecaProcessRunner());
+    try {
+      await git.init(dir, 'main');
+      await mkdir(join(dir, 'src', 'main', 'resources'), { recursive: true });
+      await writeFile(join(dir, 'pom.xml'), '<project/>');
+      await writeFile(join(dir, 'src', 'main', 'resources', 'application.yml'), 'password: hunter22');
+      await git.commitAll(dir, 'init', ['src/main/resources/application.yml']);
+      expect(await git.trackedFiles(dir)).toEqual(['pom.xml']);
+      expect(await git.dirtyPaths(dir)).toEqual(['src/main/resources/application.yml']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

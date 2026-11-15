@@ -14,6 +14,8 @@ import {
   LogoutProvider,
   ProviderRegistry,
   RepositoryBootstrapper,
+  SecretGuard,
+  ProductionEnvironment,
 } from '../application/index.js';
 import { JsonConfigRepository } from '../infrastructure/config/JsonConfigRepository.js';
 import { FileCredentialStore } from '../infrastructure/credentials/FileCredentialStore.js';
@@ -62,7 +64,9 @@ export function createContainer(opts: ContainerOptions) {
   const build = new BuildProject(proc, fs, logger);
   const listProviders = new ListProviders(providers, store, proc);
   const repoHost = new GitHubRepositoryHost(http, proc);
-  const repos = new RepositoryBootstrapper(git, repoHost, fs, credentials, prompt, logger);
+  const secrets = new SecretGuard(fs, prompt, logger);
+  const productionEnv = new ProductionEnvironment(fs, prompt, logger, secrets);
+  const repos = new RepositoryBootstrapper(git, repoHost, fs, credentials, prompt, logger, secrets);
 
   return {
     prompt,
@@ -72,10 +76,10 @@ export function createContainer(opts: ContainerOptions) {
     generate,
     listProviders,
     init: new InitProject(detect, providers, generate, configRepo, prompt, logger),
-    deploy: new DeployProject(detect, providers, generate, build, credentials, configRepo, git, repos, prompt, logger, new SystemBrowser(proc)),
+    deploy: new DeployProject(detect, providers, generate, build, credentials, configRepo, git, repos, prompt, logger, new SystemBrowser(proc), secrets, productionEnv),
     login: new LoginProvider(providers, store, prompt, [repoHost]),
     logout: new LogoutProvider(providers, store, [repoHost]),
-    doctor: new DoctorCheck(detect, listProviders, git),
+    doctor: new DoctorCheck(detect, listProviders, git, productionEnv),
     status: new GetDeploymentStatus(providers, credentials, configRepo),
   };
 }
