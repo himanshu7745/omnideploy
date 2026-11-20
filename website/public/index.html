@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>omnideploy: deploy any project with one command</title>
+  <meta name="description" content="A CLI that works out what your project is, writes the Dockerfile and platform config it needs, and deploys it to Vercel, Netlify, GitHub Pages, Railway or Render.">
+  <meta property="og:title" content="omnideploy">
+  <meta property="og:description" content="Node, Python, Java, Go, Rust, Ruby, PHP, .NET or plain HTML, deployed with one command.">
+  <meta name="theme-color" content="#f4f0e6">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+
+<header class="masthead">
+  <a class="wordmark" href="./">omnideploy<span class="ver">v0.4.0</span></a>
+  <nav>
+    <a href="#try">try it</a>
+    <a href="#start">quick start</a>
+    <a href="#providers">providers</a>
+    <a href="https://github.com/himanshu7745/omnideploy">github</a>
+    <a href="https://www.npmjs.com/package/omnideploy-cli">npm</a>
+  </nav>
+</header>
+
+<main>
+
+  <section class="intro">
+    <h1>Deploy any project, in any language, with one&nbsp;command.</h1>
+    <p class="lede">
+      omnideploy looks at your project, figures out what it is, writes the
+      <code>Dockerfile</code> and platform config it needs, shows you what it’s about
+      to write, and deploys it, to <strong>Vercel</strong>, <strong>Netlify</strong>,
+      <strong>GitHub Pages</strong>, <strong>Railway</strong> or <strong>Render</strong>.
+    </p>
+
+    <div class="install">
+      <pre id="install-cmd"><span class="ps">$</span> npx omnideploy-cli deploy render</pre>
+      <button type="button" class="copy" data-copy="install-cmd">copy</button>
+    </div>
+    <p class="aside">Needs Node 20+. Or <code>npm i -g omnideploy-cli</code> and type <code>omnideploy</code>.</p>
+  </section>
+
+  <section id="try" class="sim-section">
+    <div class="section-head">
+      <span class="sect">§1</span>
+      <h2>See what it does</h2>
+    </div>
+    <p class="narrow">
+      Pick a project and somewhere to put it. The output below is what the CLI
+      actually prints (trimmed a little), and the panel on the right shows the files it
+      would write into your repo. Try a pairing that doesn’t work, like Spring Boot on Vercel.
+    </p>
+
+    <div id="sim" class="sim">
+      <div class="pickers">
+        <div class="picker">
+          <span class="picker-label">your project</span>
+          <div id="pick-project" class="pills" role="group" aria-label="Project type"></div>
+        </div>
+        <div class="picker">
+          <span class="picker-label">deploy to</span>
+          <div id="pick-provider" class="pills" role="group" aria-label="Provider"></div>
+        </div>
+      </div>
+
+      <div class="sim-grid">
+        <div class="term">
+          <div class="term-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="term-title">zsh</span>
+            <span class="term-actions">
+              <button type="button" id="sim-skip">skip</button>
+              <button type="button" id="sim-replay">replay ↻</button>
+            </span>
+          </div>
+          <div id="sim-screen" class="term-screen" aria-live="polite"></div>
+        </div>
+
+        <div class="files">
+          <div class="files-head">files written to your repo</div>
+          <div id="sim-files-tabs" class="file-tabs" role="tablist"></div>
+          <pre id="sim-files-body" class="file-body" data-empty="waiting"></pre>
+        </div>
+      </div>
+      <div id="sim-verdict" class="verdict"></div>
+      <p class="caption">fig. 1: a simulated run. No servers were harmed, and none were deployed to.</p>
+    </div>
+  </section>
+
+  <section class="why">
+    <div class="section-head">
+      <span class="sect">§2</span>
+      <h2>Why I wrote it</h2>
+    </div>
+    <div class="narrow prose">
+      <p>
+        Every side project ended the same way: an evening spent on a
+        Dockerfile that was almost right, a <code>render.yaml</code> copied from a
+        project two years old, and a production env var I forgot until the
+        app crashed. None of that is hard. It’s just tedious, and slightly different
+        for every language and every host.
+      </p>
+      <p>
+        So omnideploy does the boring part. It reads <code>package.json</code>,
+        <code>pom.xml</code>, <code>go.mod</code> or <code>requirements.txt</code>,
+        and writes the files a careful person would write: multi-stage Dockerfiles,
+        pinned base images, a non-root user, listening on <code>$PORT</code>.
+        Then it gets out of the way. The files are yours. Edit them, commit them,
+        and it won’t overwrite them unless you pass <code>--force</code>.
+      </p>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="section-head">
+      <span class="sect">§3</span>
+      <h2>What happens when you run <code>deploy</code></h2>
+    </div>
+    <ol class="steps">
+      <li><b>Detect</b> the language, framework, port and build command. <span class="note">Anything in <code>omnideploy.json</code> wins over detection.</span></li>
+      <li><b>Pick providers</b>: the ones you named, else the ones in <code>omnideploy.json</code>, else it asks.</li>
+      <li><b>Check compatibility</b> before touching anything. <span class="note">Spring Boot on Vercel stops here, with a suggestion.</span></li>
+      <li><b>Check <code>.env.production</code></b>. If the app needs a variable that’s missing or empty, it stops and names it.</li>
+      <li><b>Generate missing files</b>, show them, and ask. Existing files are kept.</li>
+      <li><b>Get credentials</b>: environment variable, then saved token, then a prompt.</li>
+      <li><b>Sync git</b> (Render only): create a GitHub repo if there’s no remote, commit, push. <span class="note">Render builds from your repo, so the code has to be there.</span></li>
+      <li><b>Build</b> static sites locally. Servers are built by the platform.</li>
+      <li><b>Deploy</b> to each provider. If one fails, the rest still run.</li>
+      <li><b>Save</b> the site / project / service IDs to <code>omnideploy.json</code> so the next deploy updates the same app.</li>
+    </ol>
+    <p class="aside">Exit code <code>0</code> if everything deployed, <code>1</code> if anything failed, <code>130</code> if you hit Ctrl-C.</p>
+  </section>
+
+  <section id="start">
+    <div class="section-head">
+      <span class="sect">§4</span>
+      <h2>Quick start</h2>
+    </div>
+
+    <div class="tabs" data-tabs>
+      <div role="tablist" aria-label="Quick start">
+        <button role="tab" id="tab-first" aria-controls="pane-first" aria-selected="true">first deploy</button>
+        <button role="tab" id="tab-again" aria-controls="pane-again" aria-selected="false" tabindex="-1">redeploy</button>
+        <button role="tab" id="tab-later" aria-controls="pane-later" aria-selected="false" tabindex="-1">set up first</button>
+        <button role="tab" id="tab-ci" aria-controls="pane-ci" aria-selected="false" tabindex="-1">in CI</button>
+      </div>
+
+      <div role="tabpanel" id="pane-first" aria-labelledby="tab-first">
+        <pre class="code" id="code-first"><span class="ps">$</span> cd my-project
+<span class="ps">$</span> omnideploy deploy render      <span class="c"># or vercel, netlify, github-pages, railway</span></pre>
+        <button type="button" class="copy" data-copy="code-first">copy</button>
+        <p>It asks for whatever it needs along the way: a token, permission to write files, a repo name. If your app needs config, put the production values in <code>.env.production</code> first and they’ll be set on the platform for you.</p>
+      </div>
+
+      <div role="tabpanel" id="pane-again" aria-labelledby="tab-again" hidden>
+        <pre class="code" id="code-again"><span class="ps">$</span> omnideploy deploy             <span class="c"># every provider in omnideploy.json</span></pre>
+        <button type="button" class="copy" data-copy="code-again">copy</button>
+        <p>For Render, it lists your uncommitted changes and offers to commit and push them, so what gets built is what you just wrote.</p>
+      </div>
+
+      <div role="tabpanel" id="pane-later" aria-labelledby="tab-later" hidden>
+        <pre class="code" id="code-later"><span class="ps">$</span> omnideploy init               <span class="c"># detect, pick providers, write files</span>
+<span class="ps">$</span> omnideploy login netlify      <span class="c"># or set NETLIFY_AUTH_TOKEN</span>
+<span class="ps">$</span> omnideploy doctor             <span class="c"># is everything in place?</span>
+<span class="ps">$</span> omnideploy deploy</pre>
+        <button type="button" class="copy" data-copy="code-later">copy</button>
+        <p><code>doctor</code> checks Node, detection, <code>omnideploy.json</code>, <code>.env.production</code>, git and every provider’s token, and gives a fix for each problem.</p>
+      </div>
+
+      <div role="tabpanel" id="pane-ci" aria-labelledby="tab-ci" hidden>
+        <pre class="code" id="code-ci">- run: npx omnideploy-cli@latest deploy netlify --yes
+  env:
+    NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}</pre>
+        <button type="button" class="copy" data-copy="code-ci">copy</button>
+        <p>In CI (or with <code>--no-interactive</code>) it never prompts. It either proceeds because you passed <code>--yes</code>, or fails with a message telling you what to set. It won’t hang waiting for input.</p>
+      </div>
+    </div>
+
+    <h3>Handy flags</h3>
+    <dl class="flags">
+      <dt><code>--dry-run</code></dt><dd>Show the files and providers. Write nothing, deploy nothing.</dd>
+      <dt><code>--preview</code></dt><dd>Preview URL on Vercel, draft URL on Netlify. Elsewhere it refuses instead of quietly going to production.</dd>
+      <dt><code>--dir public</code></dt><dd>Deploy a folder as a static site, whatever the project is.</dd>
+      <dt><code>--force</code></dt><dd>Regenerate deployment files even if they exist.</dd>
+      <dt><code>-C &lt;dir&gt;</code></dt><dd>Run as if you’d <code>cd</code>’d there.</dd>
+    </dl>
+  </section>
+
+  <section id="languages">
+    <div class="section-head">
+      <span class="sect">§5</span>
+      <h2>What it recognises</h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Language</th><th>Spotted by</th><th>Frameworks</th></tr></thead>
+        <tbody>
+          <tr><td>Node.js</td><td><code>package.json</code></td><td>Vite, CRA, Angular, Astro, Gatsby, Next.js, Nuxt, SvelteKit, Remix, NestJS, Express, Fastify, Koa, Hono</td></tr>
+          <tr><td>Python</td><td><code>requirements.txt</code>, <code>pyproject.toml</code>, <code>Pipfile</code></td><td>Django, FastAPI, Flask, Streamlit, with pip, Poetry or uv</td></tr>
+          <tr><td>Java</td><td><code>pom.xml</code>, <code>build.gradle</code></td><td>Spring Boot, Quarkus, Micronaut</td></tr>
+          <tr><td>Go</td><td><code>go.mod</code></td><td>Gin, Echo, Fiber, chi, net/http</td></tr>
+          <tr><td>Rust</td><td><code>Cargo.toml</code></td><td>Axum, Actix Web, Rocket, Warp, Poem</td></tr>
+          <tr><td>Ruby</td><td><code>Gemfile</code></td><td>Rails, Sinatra</td></tr>
+          <tr><td>PHP</td><td><code>composer.json</code>, <code>index.php</code></td><td>Laravel, Symfony, plain PHP</td></tr>
+          <tr><td>.NET</td><td><code>*.csproj</code></td><td>ASP.NET Core</td></tr>
+          <tr><td>HTML</td><td><code>index.html</code></td><td>deployed as-is</td></tr>
+          <tr><td>Anything</td><td><code>Dockerfile</code></td><td>your own image</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="providers">
+    <div class="section-head">
+      <span class="sect">§6</span>
+      <h2>Where it can go</h2>
+    </div>
+    <div class="table-wrap">
+      <table class="matrix">
+        <thead><tr><th></th><th>Vercel</th><th>Netlify</th><th>GitHub Pages</th><th>Railway</th><th>Render</th></tr></thead>
+        <tbody>
+          <tr><th>Static sites</th><td class="y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="y">yes <small>nginx</small></td><td class="y">yes</td></tr>
+          <tr><th>Next / Nuxt / SvelteKit / Remix / Astro SSR</th><td class="y">native</td><td class="n">no</td><td class="n">no</td><td class="y">Docker</td><td class="y">yes</td></tr>
+          <tr><th>Servers, any language</th><td class="n">no</td><td class="n">no</td><td class="n">no</td><td class="y">Docker</td><td class="y">native or Docker</td></tr>
+          <tr><th><code>--preview</code></th><td class="y">preview URL</td><td class="y">draft URL</td><td class="n">no</td><td class="n">no</td><td class="n">no</td></tr>
+          <tr><th>Builds from</th><td>your machine</td><td>your machine</td><td>your machine</td><td>CLI upload</td><td>your git remote</td></tr>
+          <tr><th>Token</th><td><code>VERCEL_TOKEN</code></td><td><code>NETLIFY_AUTH_TOKEN</code></td><td><code>GITHUB_TOKEN</code></td><td><code>RAILWAY_TOKEN</code></td><td><code>RENDER_API_KEY</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="secrets">
+    <div class="section-head">
+      <span class="sect">§7</span>
+      <h2>Secrets stay secret</h2>
+    </div>
+    <div class="narrow prose">
+      <p>
+        Production config lives in one file, <code>.env.production</code>. omnideploy
+        works out which variables the app needs (from <code>.env.example</code>, or
+        <code>${VAR}</code> placeholders in Spring config) and stops if one is
+        missing. Then it sets them on the platform. Values are never printed,
+        and tokens are scrubbed from any git or CLI output it shows you.
+      </p>
+      <p>
+        Before it commits anything, it checks for files that look like secrets
+        (<code>.env</code>, private keys, credential JSON) and for tokens pasted into
+        source. It won’t upload or push them.
+      </p>
+    </div>
+  </section>
+
+  <section id="limits">
+    <div class="section-head">
+      <span class="sect">§8</span>
+      <h2>Things it won’t do (yet)</h2>
+    </div>
+    <ul class="limits narrow">
+      <li>Run a server on Vercel, Netlify or GitHub Pages. They host static sites (and, on Vercel, SSR frameworks). It’ll tell you and point you to Railway or Render.</li>
+      <li><code>omnideploy status</code> for Railway. Check the Railway dashboard instead.</li>
+      <li>Railway deploys need the <a href="https://docs.railway.com/guides/cli">Railway CLI</a> installed. omnideploy drives it rather than reimplementing it.</li>
+      <li>Provision your database. Point <code>DATABASE_URL</code> at one you already have.</li>
+      <li>Make GitHub Pages work on a private repo without a paid plan. That one’s GitHub’s rule.</li>
+    </ul>
+    <p class="aside">Something here wrong, or missing? <a href="https://github.com/himanshu7745/omnideploy/issues">Open an issue.</a> The README is the full reference.</p>
+  </section>
+
+</main>
+
+<footer class="colophon">
+  <p>
+    omnideploy is MIT licensed and built by
+    <a href="https://github.com/himanshu7745">Himanshu Mishra</a>.
+    This page is plain HTML, CSS and a bit of TypeScript, served by GitHub Pages.
+  </p>
+  <p><a href="https://github.com/himanshu7745/omnideploy">source</a> · <a href="https://github.com/himanshu7745/omnideploy#readme">README</a> · <a href="https://www.npmjs.com/package/omnideploy-cli">npm</a></p>
+</footer>
+
+</body>
+</html>

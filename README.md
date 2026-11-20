@@ -2,6 +2,8 @@
 
 One CLI to deploy any project — Node, Python, Java, Go, Rust, Ruby, PHP, .NET or plain HTML — to **Vercel, Netlify, GitHub Pages, Railway and Render**.
 
+**Website:** https://himanshu7745.github.io/omnideploy/ (with an interactive demo)
+
 ```bash
 cd my-spring-boot-app
 npx omnideploy-cli deploy render
@@ -751,6 +753,7 @@ npm install
 npm run dev -- deploy --dry-run -C ../some-project   # run from source
 npm run check                                        # typecheck + architecture rules + tests
 npm run smoke:docker                                 # build & run generated Dockerfiles (needs Docker)
+npm run site:dev                                     # the website in website/, at http://localhost:3000
 ```
 
 The code follows Clean Architecture, and the dependency rule is enforced by `dependency-cruiser`:

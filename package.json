@@ -30,7 +30,9 @@
     "lint:arch": "depcruise src --config .dependency-cruiser.cjs",
     "check": "npm run typecheck && npm run lint:arch && npm test",
     "smoke:docker": "npm run build && scripts/docker-smoke.sh",
-    "prepublishOnly": "npm run check && npm run build"
+    "prepublishOnly": "npm run check && npm run build",
+    "site:build": "tsc -p website/tsconfig.json",
+    "site:dev": "tsc -p website/tsconfig.json && (tsc -p website/tsconfig.json --watch --preserveWatchOutput & npx --yes serve website/public)"
   },
   "license": "MIT",
   "dependencies": {
